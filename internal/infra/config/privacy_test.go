@@ -38,8 +38,11 @@ func TestPrivacyAndNoFakeProductionCVEGuard(t *testing.T) {
 			}
 			return nil
 		}
-		// Skip gitignored user local files
-		if rel == "sentinel.yaml" || rel == "latest_status.json" || strings.HasSuffix(rel, ".png") {
+		// Skip gitignored user local files and binary image assets
+		lowRel := strings.ToLower(rel)
+		if rel == "sentinel.yaml" || rel == "latest_status.json" ||
+			strings.HasSuffix(lowRel, ".png") || strings.HasSuffix(lowRel, ".jpg") ||
+			strings.HasSuffix(lowRel, ".jpeg") || strings.HasSuffix(lowRel, ".webp") || strings.HasSuffix(lowRel, ".gif") {
 			return nil
 		}
 
