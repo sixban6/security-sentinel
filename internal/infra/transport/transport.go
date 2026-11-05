@@ -29,9 +29,8 @@ type Executor interface {
 	RunStdin(ctx context.Context, cmd string, stdin string, timeout time.Duration) (Result, error)
 }
 
-// EnsureStandardUserPATH enriches process PATH with standard Homebrew/user bin directories
-// because macOS GUI .app bundles launch with a stripped PATH (/usr/bin:/bin:/usr/sbin:/sbin),
-// which would otherwise hide tools like wstunnel, cloudflared, brew, uv, go, and cargo.
+// EnsureStandardUserPATH enriches process PATH with standard Homebrew, Docker, and multi-language toolchain directories
+// so GUI .app bundles and non-interactive subshells discover 100% of installed runtimes & binaries.
 func EnsureStandardUserPATH() {
 	home, _ := os.UserHomeDir()
 	extra := []string{
@@ -39,12 +38,23 @@ func EnsureStandardUserPATH() {
 		"/opt/homebrew/sbin",
 		"/usr/local/bin",
 		"/usr/local/sbin",
+		"/Applications/Docker.app/Contents/Resources/bin",
+		"/Applications/OrbStack.app/Contents/MacOS/xbin",
 	}
 	if home != "" {
 		extra = append(extra,
 			filepath.Join(home, ".local", "bin"),
 			filepath.Join(home, ".cargo", "bin"),
 			filepath.Join(home, "go", "bin"),
+			filepath.Join(home, ".bun", "bin"),
+			filepath.Join(home, ".deno", "bin"),
+			filepath.Join(home, ".volta", "bin"),
+			filepath.Join(home, ".pyenv", "shims"),
+			filepath.Join(home, ".rbenv", "shims"),
+			filepath.Join(home, ".sdkman", "candidates", "java", "current", "bin"),
+			filepath.Join(home, ".local", "share", "mise", "shims"),
+			filepath.Join(home, ".asdf", "shims"),
+			filepath.Join(home, ".orbstack", "bin"),
 		)
 	}
 	cur := os.Getenv("PATH")
@@ -89,6 +99,7 @@ func (l *LocalExecutor) Run(ctx context.Context, cmdStr string, timeout time.Dur
 }
 
 func (l *LocalExecutor) RunStdin(ctx context.Context, cmdStr string, stdin string, timeout time.Duration) (Result, error) {
+	EnsureStandardUserPATH()
 	if timeout <= 0 {
 		timeout = 15 * time.Second
 	}

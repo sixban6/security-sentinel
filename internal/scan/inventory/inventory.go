@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -165,6 +164,20 @@ func saveDiscoveredSnapshot(list []model.HostInventory) {
 	_ = os.WriteFile(p, raw, 0o600)
 }
 
+// LoadDiscoveredInventories loads the full 5-layer discovered asset snapshots from disk for the Asset Explorer.
+func LoadDiscoveredInventories() map[string]model.HostInventory {
+	p := filepath.Join(config.StateDir(), "discovered_inventory.yaml")
+	data, err := os.ReadFile(p)
+	if err != nil {
+		return nil
+	}
+	var out map[string]model.HostInventory
+	if yaml.Unmarshal(data, &out) != nil {
+		return nil
+	}
+	return out
+}
+
 // CollectSingle probes a single local or remote host, honoring split-TTL fingerprint cache.
 func CollectSingle(ctx context.Context, target model.HostTarget, workspaces []string, opts CollectOptions) model.HostInventory {
 	exec := transport.New(target)
@@ -238,41 +251,22 @@ func collectDarwinLocalInventory(ctx context.Context, exec transport.Executor, t
 		CollectedAt:        start,
 	}
 
+	// L1: OS & Firmware Metadata (macOS release, kernel, XProtect)
 	probeCmd := `
 echo "SW_VERS:$(sw_vers -productVersion 2>/dev/null)"
 echo "ARCH:$(uname -m 2>/dev/null)"
 echo "KRN:$(uname -r 2>/dev/null)"
 echo "XPROTECT:$(plutil -extract CFBundleShortVersionString raw -o - /Library/Apple/System/Library/CoreServices/XProtect.bundle/Contents/Info.plist 2>/dev/null)"
-echo "UID:$(id -u 2>/dev/null)"
 echo "BREW:$(command -v brew 2>/dev/null)"
-echo "===BREW_LIST==="
-brew list --versions 2>/dev/null || true
-echo "===PIP_LIST==="
-python3 -m pip list --format=json 2>/dev/null || true
-echo "===RUNTIMES==="
-for b in go node cargo php singctl sing-box docker; do
-  if command -v "$b" >/dev/null 2>&1; then
-    v=$("$b" version 2>/dev/null || "$b" --version 2>/dev/null || "$b" -v 2>&1 | head -n 1)
-    echo "__RT__:${b}:$(printf '%s' "$v" | head -n 1)"
-  fi
-done
 `
-	res, err := exec.Run(ctx, probeCmd, 15*time.Second)
+	res, err := exec.Run(ctx, probeCmd, 8*time.Second)
 	if err != nil {
 		inv.Error = err.Error()
 		return inv
 	}
 
 	osVer, arch, krn, xprotectVer, hasBrew := "", runtime.GOARCH, "", "", false
-	isRoot := os.Geteuid() == 0
-
-	sections := splitSections(res.Stdout, map[string]string{
-		"===BREW_LIST===": "brew",
-		"===PIP_LIST===":  "pip",
-		"===RUNTIMES===":  "rt",
-	})
-
-	for _, line := range strings.Split(sections["head"], "\n") {
+	for _, line := range strings.Split(res.Stdout, "\n") {
 		line = strings.TrimSpace(line)
 		switch {
 		case strings.HasPrefix(line, "SW_VERS:"):
@@ -312,69 +306,41 @@ done
 		PkgMgr:         pm,
 		MemAvailableMB: 4096,
 		OverlayAvailMB: 10240,
-		IsRoot:         isRoot,
+		IsRoot:         os.Geteuid() == 0,
 	}
 
-	// Parse Homebrew packages
-	for _, line := range strings.Split(sections["brew"], "\n") {
-		fields := strings.Fields(strings.TrimSpace(line))
-		if len(fields) >= 2 {
-			name := strings.ToLower(fields[0])
-			ver := fields[len(fields)-1]
-			inv.Packages[name] = ver
-			inv.Assets = append(inv.Assets, model.AssetItem{
-				Ecosystem: model.EcoHomebrew,
-				Name:      name,
-				Version:   ver,
-				Location:  "homebrew",
-				Kind:      "os",
-			})
-		}
-	}
-
-	// Parse global pip packages
-	if pipRaw := strings.TrimSpace(sections["pip"]); strings.HasPrefix(pipRaw, "[") {
-		var pipItems []struct {
-			Name    string `json:"name"`
-			Version string `json:"version"`
-		}
-		if json.Unmarshal([]byte(pipRaw), &pipItems) == nil {
-			for _, it := range pipItems {
-				name := strings.ToLower(strings.ReplaceAll(it.Name, "_", "-"))
-				if name != "" && it.Version != "" {
-					inv.Packages[name] = it.Version
-					inv.Assets = append(inv.Assets, model.AssetItem{
-						Ecosystem: model.EcoPyPI,
-						Name:      name,
-						Version:   it.Version,
-						Location:  "global-pip",
-						Kind:      "runtime",
-					})
-				}
-			}
-		}
-	}
-
-	// Parse runtimes
-	for _, line := range strings.Split(sections["rt"], "\n") {
-		if !strings.HasPrefix(line, "__RT__:") {
-			continue
-		}
-		parts := strings.SplitN(strings.TrimPrefix(line, "__RT__:"), ":", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		bName, rawV := parts[0], cleanVersionString(parts[1])
-		if rawV != "" {
-			inv.Packages[bName] = rawV
-		}
-	}
-
-	// Workspace lockfile & .venv deep scan
+	// L5: Workspace Project Lockfiles & Virtualenvs
 	wsRes := lockfile.ScanWorkspaces(workspaces)
 	inv.EcosystemSummary = wsRes.Summary
 	inv.EcosystemSummary.Kernel = "Darwin " + krn
 	inv.OrphanedVenvs = wsRes.OrphanedVenvs
+
+	// L2 + L3 + L4: Run Homebrew/Apps, Docker/Containers, and Global Toolchains concurrently!
+	var layerWG sync.WaitGroup
+	var brewInv, dockerInv, toolInv model.HostInventory
+	brewInv.Target, brewInv.Packages = target, make(map[string]string)
+	dockerInv.Target, dockerInv.Packages = target, make(map[string]string)
+	toolInv.Target, toolInv.Packages = target, make(map[string]string)
+
+	layerWG.Add(3)
+	go func() {
+		defer layerWG.Done()
+		ProbeHomebrewAndAppsLayer(ctx, exec, &brewInv)
+	}()
+	go func() {
+		defer layerWG.Done()
+		ProbeContainerLayer(ctx, exec, &dockerInv)
+	}()
+	go func() {
+		defer layerWG.Done()
+		ProbeGlobalToolchainsLayer(ctx, exec, &toolInv)
+	}()
+	layerWG.Wait()
+
+	mergeLayerInventory(&inv, &brewInv)
+	mergeLayerInventory(&inv, &dockerInv)
+	mergeLayerInventory(&inv, &toolInv)
+
 	inv.Assets = append(inv.Assets, wsRes.Assets...)
 	for _, a := range wsRes.Assets {
 		low := strings.ToLower(a.Name)
@@ -383,14 +349,36 @@ done
 		}
 	}
 
-	// Check local applied mitigations if any
 	readLocalAppliedMitigations("/etc/sentinel/remediations", inv.AppliedMitigations)
 
-	// OS security updates (Homebrew foundational security whitelist)
+	// OS security updates (Apple same-branch patches + Homebrew security formula checks)
 	inv.OSSecurity = ScanOSSecurity(ctx, exec, inv.OSContext, nil, intelCli)
+	inv.OSContext = inv.OSSecurity.OSContext
 	inv.LatencyMS = time.Since(start).Milliseconds()
 	inv.Fingerprint, _ = probeQuickFingerprint(ctx, exec, target)
 	return inv
+}
+
+func mergeLayerInventory(dst *model.HostInventory, src *model.HostInventory) {
+	for k, v := range src.Packages {
+		dst.Packages[k] = v
+	}
+	for k, v := range src.DockerContainers {
+		dst.DockerContainers[k] = v
+	}
+	dst.Assets = append(dst.Assets, src.Assets...)
+	dst.EcosystemSummary.HomebrewFormulae += src.EcosystemSummary.HomebrewFormulae
+	dst.EcosystemSummary.HomebrewCasks += src.EcosystemSummary.HomebrewCasks
+	dst.EcosystemSummary.MacApps += src.EcosystemSummary.MacApps
+	dst.EcosystemSummary.DockerContainers += src.EcosystemSummary.DockerContainers
+	dst.EcosystemSummary.DockerImages += src.EcosystemSummary.DockerImages
+	if src.EcosystemSummary.DockerVersion != "" {
+		dst.EcosystemSummary.DockerVersion = src.EcosystemSummary.DockerVersion
+	}
+	dst.EcosystemSummary.GlobalTools += src.EcosystemSummary.GlobalTools
+	for _, tc := range src.EcosystemSummary.Toolchains {
+		dst.EcosystemSummary.Toolchains = appendUniqueStr(dst.EcosystemSummary.Toolchains, tc)
+	}
 }
 
 func collectLinuxOrRemoteInventory(ctx context.Context, exec transport.Executor, target model.HostTarget, workspaces []string, intelCli *intel.Client) model.HostInventory {

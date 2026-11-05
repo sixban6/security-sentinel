@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.7.0] - 2026-11-05
+
+### Features
+
+* **panorama-5layer:** unify 5-layer host introspection across macOS & Linux — Homebrew (`Formulae` + `Casks`), macOS `/Applications`, Docker/OrbStack/Colima/Podman (`ServerVersion` + running containers + local images), global toolchains (`npm -g`, `bun`, `cargo install`, `uv`, `pyenv`, `conda`, `rustup`, `sdkman`, `mise`), and clickable Panorama Asset Explorer (`sectl assets` & GUI modal)
+* **exemption-ux:** strip cross-generational Apple `_major` OS upgrades from security vulnerability counts, and add 3-tier `Skip-Version` / `Snooze 30d` / `Permanent Mute` controls (`sectl mute` / `sectl unmute` & GUI Triage `已豁免/暂缓` manager)
+
 ## [2.6.0] - 2026-11-05
 
 ### Features

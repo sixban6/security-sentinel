@@ -8,11 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 	"github.com/egoist/mygo/ui/chart"
-	"github.com/egoist/mygo/ui/editor"
-	"github.com/egoist/mygo/ui/markdown"
 	"github.com/sixban6/security-sentinel/internal/infra/config"
 	"github.com/sixban6/security-sentinel/internal/infra/model"
 	"github.com/sixban6/security-sentinel/internal/ops/notify"
@@ -59,9 +56,10 @@ func (s *AppState) MissionControlView(c *ui.Context) {
 		},
 	).Fill()
 
-	// SSH Config Auto-Discovery Onboarding Modal
+	// SSH Config Auto-Discovery, Manual Add, and Panorama Asset Explorer Modals
 	s.renderSSHOnboardingModal(c)
 	s.renderManualAddHostModal(c)
+	s.renderAssetExplorerModal(c)
 
 	// Safety Confirmation AlertDialog before Remote Rollback
 	if s.PendingRollback != nil {
@@ -203,6 +201,12 @@ func (s *AppState) renderOverviewPage(c *ui.Context) {
 				osUpdates++
 			}
 		}
+		ecoAgg.HomebrewFormulae += h.EcosystemSummary.HomebrewFormulae
+		ecoAgg.HomebrewCasks += h.EcosystemSummary.HomebrewCasks
+		ecoAgg.MacApps += h.EcosystemSummary.MacApps
+		ecoAgg.DockerContainers += h.EcosystemSummary.DockerContainers
+		ecoAgg.DockerImages += h.EcosystemSummary.DockerImages
+		ecoAgg.GlobalTools += h.EcosystemSummary.GlobalTools
 		ecoAgg.PythonVenvs += h.EcosystemSummary.PythonVenvs
 		ecoAgg.NodeProjects += h.EcosystemSummary.NodeProjects
 		ecoAgg.GoModules += h.EcosystemSummary.GoModules
@@ -210,7 +214,6 @@ func (s *AppState) renderOverviewPage(c *ui.Context) {
 		ecoAgg.JavaJDKs += h.EcosystemSummary.JavaJDKs
 		ecoAgg.JavaProjects += h.EcosystemSummary.JavaProjects
 		ecoAgg.PHPProjects += h.EcosystemSummary.PHPProjects
-		ecoAgg.DockerContainers += h.EcosystemSummary.DockerContainers
 	}
 
 	posture := s.ClusterPosture()
@@ -316,17 +319,33 @@ func (s *AppState) renderOverviewPage(c *ui.Context) {
 			})
 		}
 
-		// 4. Workspace & Container Supply-Chain Radar
+		// 4. Universal 5-Layer Panorama Supply-Chain Radar (clickable pills open Asset Explorer!)
 		ui.Column(c).Padding(18, 20).Radius(12).Gap(10).Background(t.Surface).Border(1, t.Border).Children(func() {
-			ui.Text(c, "多语言生态隔离环境与容器供应链覆盖").FontSize(15).Bold()
+			ui.Row(c).AlignItems(ui.Center).Children(func() {
+				ui.Column(c).Grow(1).Gap(2).Children(func() {
+					ui.Text(c, "五层全景资产与多语言供应链覆盖").FontSize(15).Bold()
+					ui.Text(c, "点击下方任意生态胶囊或右侧按钮，即可打开全景资产透明浏览器查看每一项被纳管的软件与版本明细").
+						FontSize(11).TextColor(t.TextMuted)
+				})
+				ui.Button(c.Key("ov-open-explorer"), "浏览全景资产明细").OnClick(func() {
+					s.OpenAssetExplorerModal(0)
+				})
+			})
 			ui.Row(c).Gap(10).Wrap().Children(func() {
-				renderPillStat(c, "Python 虚拟环境 (.venv)", ecoAgg.PythonVenvs)
-				renderPillStat(c, "Java 工程 (Maven/Gradle)", ecoAgg.JavaProjects)
-				renderPillStat(c, "Java JDK 实例", ecoAgg.JavaJDKs)
-				renderPillStat(c, "前端工程 (npm/pnpm/yarn)", ecoAgg.NodeProjects)
-				renderPillStat(c, "Go 模块 (go.mod)", ecoAgg.GoModules)
-				renderPillStat(c, "Rust 工程 (Cargo.lock)", ecoAgg.RustCrates)
-				renderPillStat(c, "活跃 Docker 容器", ecoAgg.DockerContainers)
+				renderClickablePillStat(c, "ov-p-brew", fmt.Sprintf("Homebrew (%d Formula / %d Cask)", ecoAgg.HomebrewFormulae, ecoAgg.HomebrewCasks),
+					ecoAgg.HomebrewFormulae+ecoAgg.HomebrewCasks, func() { s.OpenAssetExplorerModal(1) })
+				renderClickablePillStat(c, "ov-p-docker", fmt.Sprintf("Docker (%d 容器 / %d 镜像)", ecoAgg.DockerContainers, ecoAgg.DockerImages),
+					ecoAgg.DockerContainers+ecoAgg.DockerImages, func() { s.OpenAssetExplorerModal(2) })
+				renderClickablePillStat(c, "ov-p-tools", "全局 CLI 与工具链", ecoAgg.GlobalTools, func() { s.OpenAssetExplorerModal(3) })
+				if ecoAgg.MacApps > 0 {
+					renderClickablePillStat(c, "ov-p-apps", "macOS 桌面应用 (.app)", ecoAgg.MacApps, func() { s.OpenAssetExplorerModal(1) })
+				}
+				renderClickablePillStat(c, "ov-p-py", "Python 虚拟环境 (.venv)", ecoAgg.PythonVenvs, func() { s.OpenAssetExplorerModal(5) })
+				renderClickablePillStat(c, "ov-p-java", fmt.Sprintf("Java (%d 工程 / %d JDK)", ecoAgg.JavaProjects, ecoAgg.JavaJDKs),
+					ecoAgg.JavaProjects+ecoAgg.JavaJDKs, func() { s.OpenAssetExplorerModal(5) })
+				renderClickablePillStat(c, "ov-p-node", "前端工程 (npm/pnpm/yarn)", ecoAgg.NodeProjects, func() { s.OpenAssetExplorerModal(5) })
+				renderClickablePillStat(c, "ov-p-go", "Go 模块 (go.mod)", ecoAgg.GoModules, func() { s.OpenAssetExplorerModal(5) })
+				renderClickablePillStat(c, "ov-p-rust", "Rust 工程 (Cargo.lock)", ecoAgg.RustCrates, func() { s.OpenAssetExplorerModal(5) })
 			})
 		})
 	})
@@ -343,14 +362,18 @@ func renderKPICard(c *ui.Context, title, val, sub string, valColor ui.Color) {
 		})
 }
 
-func renderPillStat(c *ui.Context, label string, count int) {
+func renderClickablePillStat(c *ui.Context, key, label string, count int, onClick func()) {
 	t := c.Theme()
-	ui.Row(c).Padding(8, 12).Radius(8).Gap(8).AlignItems(ui.Center).
-		Background(t.Background).Border(1, t.Border).
-		Children(func() {
-			ui.Text(c, label).FontSize(12)
-			ui.Badge(c, fmt.Sprint(count)).Background(t.Accent.Alpha(0.15)).TextColor(t.Accent)
-		})
+	pill := ui.Row(c.Key(key)).Padding(8, 12).Radius(8).Gap(8).AlignItems(ui.Center).
+		Background(t.Background).Border(1, t.Border).Cursor(ui.CursorPointer)
+	if pill.Hovered() {
+		pill.Background(t.SurfaceHover).BorderColor(t.Accent)
+	}
+	pill.OnClick(onClick)
+	pill.Children(func() {
+		ui.Text(c, label).FontSize(12)
+		ui.Badge(c, fmt.Sprint(count)).Background(t.Accent.Alpha(0.15)).TextColor(t.Accent)
+	})
 }
 
 // ============================================================================
@@ -707,169 +730,6 @@ func (s *AppState) removeHost(hostKey string, displayName string) {
 	}
 	s.Report.Hosts = nextRep
 	_ = notify.SaveReport(s.Report, "")
-}
-
-// ============================================================================
-// Page 3: Vulnerability Triage & Side-by-Side GPU Diff Surgery Center
-// ============================================================================
-func (s *AppState) renderTriageDiffPage(c *ui.Context) {
-	t := c.Theme()
-	entries := s.FilteredVulnEntries()
-
-	var selected *SelectedVulnEntry
-	for i := range entries {
-		if vulnEntryKey(entries[i]) == s.SelectedVulnKey {
-			selected = &entries[i]
-			break
-		}
-	}
-	if selected == nil && len(entries) > 0 {
-		selected = &entries[0]
-		s.SelectedVulnKey = vulnEntryKey(entries[0])
-	}
-	if selected != nil {
-		s.syncDiffBuffersForEntry(*selected)
-	}
-
-	ui.Column(c).Fill().Children(func() {
-		// Top Filter Toolbar
-		ui.Row(c).Padding(12, 20).Gap(10).AlignItems(ui.Center).
-			BorderWidth(0, 0, 1, 0).BorderColor(t.Border).
-			Children(func() {
-				ui.Segmented(c.Key("triage-filter"), &s.TriageFilter,
-					"全部待处置", "系统安全更新", "代码与内核 CVE", "已免疫闭环",
-				).Label("漏洞筛选")
-				ui.Spacer(c)
-				ui.Text(c, fmt.Sprintf("共 %d 项条目", len(entries))).FontSize(12).TextColor(t.TextMuted)
-			})
-
-		if len(entries) == 0 {
-			ui.Column(c).Grow(1).Center().Gap(10).Children(func() {
-				ui.Icon(c, IconShield).FontSize(40).TextColor(ui.Hex("#10b981"))
-				ui.Text(c, "当前筛选条件下零待处置风险，全集群运行健康！").FontSize(15).Bold()
-				ui.Text(c, "可点击左侧或顶部「立即全量巡检」拉取最新 OSV 与内核安全通告").FontSize(12).TextColor(t.TextMuted)
-			})
-			return
-		}
-
-		// Master-Detail Split: Left Vulnerability List | Right Markdown + GPU DiffView
-		ui.Split(c, &s.TriageSplit,
-			func() {
-				ui.Scroll(c.Key("triage-left-scroll")).Fill().Padding(10).Gap(6).Children(func() {
-					for i := range entries {
-						e := entries[i]
-						k := vulnEntryKey(e)
-						isSel := k == s.SelectedVulnKey
-						itemBox := ui.Column(c.Key("ve-"+k)).Padding(10, 12).Radius(10).Gap(4).
-							Cursor(ui.CursorPointer).Border(1, t.Border)
-						if isSel {
-							itemBox.Background(t.Accent.Alpha(0.14)).BorderColor(t.Accent)
-						} else if itemBox.Hovered() {
-							itemBox.Background(t.SurfaceHover)
-						} else {
-							itemBox.Background(t.Surface)
-						}
-						itemBox.OnClick(func() {
-							s.SelectedVulnKey = k
-						})
-						itemBox.Children(func() {
-							ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
-								sevColor := ui.Hex("#f59e0b")
-								if e.Vuln.Severity == "CRITICAL" {
-									sevColor = ui.Hex("#ef4444")
-								}
-								ui.Badge(c, e.Vuln.Severity).Background(sevColor.Alpha(0.18)).TextColor(sevColor)
-								ui.Text(c, e.Vuln.EffectiveID()).Bold().FontSize(12).Grow(1).SingleLine()
-							})
-							ui.Text(c, fmt.Sprintf("%s · %s (%s)", e.Host.Host, e.Vuln.Package, e.Vuln.InstalledVersion)).
-								FontSize(11).TextColor(t.TextMuted).SingleLine()
-						})
-					}
-				})
-			},
-			func() {
-				if selected == nil {
-					return
-				}
-				sel := *selected
-				v := sel.Vuln
-				ui.Column(c).Fill().Padding(16, 20).Gap(12).Children(func() {
-					// Detail Header & Action Buttons
-					ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
-						ui.Column(c).Grow(1).Gap(2).Children(func() {
-							ui.Text(c, fmt.Sprintf("%s — %s (%s)", v.EffectiveID(), v.Package, sel.Host.Host)).FontSize(16).Bold()
-							locStr := v.Location
-							if locStr == "" {
-								locStr = sel.Host.OSContext.OSPretty
-							}
-							ui.Text(c, fmt.Sprintf("位置: %s · 当前版本: %s · 修复版本: %s",
-								locStr, v.InstalledVersion, firstNonEmptyStr(v.FixedVersion, "待确认"))).
-								FontSize(12).TextColor(t.TextMuted)
-						})
-
-						if !sel.IsFixed {
-							if v.Package == "macos-system" {
-								ui.PrimaryButton(c.Key("tri-open-mac-su"), "打开 macOS 软件更新").OnClick(func() {
-									OpenAppleSoftwareUpdate()
-									c.Toast("已打开 macOS 系统设置 ➔ 软件更新")
-								})
-							} else if v.IsOSPackage && sel.Host.OSSecurity.RemediationPlan.SafeToExecute {
-								ui.PrimaryButton(c.Key("tri-apply-os"), "安装此主机安全补丁").
-									Disabled(s.FixingHost != "").
-									OnClick(func() {
-										s.ApplyHostOSFixesAsync(sel.Host.Target.EffectiveKey())
-										c.Toast("正在执行定向安全补丁安装…")
-									})
-							} else if !v.IsOSPackage {
-								ui.Button(c.Key("tri-ask-ai"), "").Disabled(s.AIRunning).Children(func() {
-									ui.Icon(c, IconSpark)
-									ui.Text(c, "AI 研判生成双脚本").SingleLine()
-								}).OnClick(func() {
-									s.GenerateAITriageForSelectedAsync(sel)
-									c.Toast("正在调用 AI 研判可行性与配对回滚脚本…")
-								})
-
-								if v.MitigateScript != "" && v.RollbackScript != "" {
-									ui.PrimaryButton(c.Key("tri-approve-exec"), "批准并远程执行").
-										Disabled(s.AIRunning).
-										OnClick(func() {
-											s.ApproveAndExecuteSelectedMitigation(sel)
-											c.Toast("正在下发加固脚本并进行多节点网络探活…")
-										})
-								}
-							}
-						}
-						ui.Button(c.Key("tri-copy-script"), "复制右侧脚本").OnClick(func() {
-							if !s.Headless {
-								mygo.Clipboard.WriteText(s.DiffState.New.String())
-							}
-							c.Toast("已复制到剪贴板")
-						})
-					})
-
-					// Markdown Vulnerability Brief (ui/markdown)
-					mdDoc := fmt.Sprintf("**漏洞摘要**: %s\n\n- **状态提示**: %s\n- **安全承诺**: 所有远程变更均配备断网自动秒级回滚与本地熔断保护。",
-						firstNonEmptyStr(v.Summary, "详见官方通告"),
-						firstNonEmptyStr(v.Reason, firstNonEmptyStr(v.Action, "先审阅下方处方 Diff，确认无误后再执行")),
-					)
-					ui.Scroll(c.Key("tri-md-scroll")).MaxHeight(115).Padding(10, 14).Radius(10).
-						Background(t.Surface).Border(1, t.Border).
-						Children(func() {
-							markdown.View(c, mdDoc, &s.MDOpts)
-						})
-
-					// Side-by-Side GPU Code Diff Viewer (ui/editor.DiffView)
-					ui.Row(c).AlignItems(ui.Center).Children(func() {
-						ui.Text(c, "处方对比台 (左: 基准状态 / 应急回滚脚本  |  右: 拟执行命令 / 可编辑加固脚本)").
-							FontSize(12).Bold().TextColor(t.TextMuted)
-					})
-					ui.Box(c).Grow(1).FillWidth().Radius(10).Clip().Border(1, t.Border).Children(func() {
-						editor.DiffView(c, s.DiffState).Fill()
-					})
-				})
-			},
-		).Grow(1).FillWidth()
-	})
 }
 
 // ============================================================================

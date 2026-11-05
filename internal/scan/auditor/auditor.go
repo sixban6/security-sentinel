@@ -335,7 +335,8 @@ func auditSingleHost(
 	}
 
 	matchedCVESet := make(map[string]bool)
-	var unmitigated, mitigated []model.VulnerabilityMatch
+	var unmitigated, mitigated, ignored []model.VulnerabilityMatch
+	hostKey := inv.Target.EffectiveKey()
 	for _, m := range runtimeMatches {
 		key := strings.ToUpper(strings.ReplaceAll(m.EffectiveID(), "_", "-"))
 		matchedCVESet[key] = true
@@ -343,9 +344,17 @@ func auditSingleHost(
 			m.Mitigated = true
 			m.Action = "现场规避加固已生效"
 			mitigated = append(mitigated, m)
-		} else {
-			unmitigated = append(unmitigated, m)
+			continue
 		}
+		if mem != nil {
+			if isMuted, muteNote := mem.MatchIgnoreRule(hostKey, m); isMuted {
+				m.Status = "已豁免/忽略"
+				m.Reason = muteNote
+				ignored = append(ignored, m)
+				continue
+			}
+		}
+		unmitigated = append(unmitigated, m)
 	}
 
 	for appliedCVE := range inv.AppliedMitigations {
@@ -368,6 +377,7 @@ func auditSingleHost(
 	res.UnmitigatedItems = unmitigated
 	res.MitigatedVulnerabilities = mitigated
 	res.FixedItems = mitigated
+	res.IgnoredItems = ignored
 
 	// Count active vs archived workspace projects for calm, non-alarmist summary note
 	activeProjCount, activePkgCount := 0, 0
@@ -426,6 +436,12 @@ func auditSingleHost(
 	default:
 		res.Status = model.StatusClean
 		res.Detail = fmt.Sprintf("系统、内核与运行态服务 100%% 安全 (%d 项组件已核验)", maxInt(len(inv.Packages), 1))
+		if inv.OSContext.OptionalMajorUpgrade != "" {
+			res.Detail += fmt.Sprintf(" · ℹ️ 可选跨代升级 %s", inv.OSContext.OptionalMajorUpgrade)
+		}
+		if len(ignored) > 0 {
+			res.Detail += fmt.Sprintf(" · 🔕 已豁免/暂缓 %d 项", len(ignored))
+		}
 		if activeProjCount > 0 {
 			res.Detail += fmt.Sprintf(" · 💡 %d 个近期活跃开发项目有 %d 个依赖包建议升级", activeProjCount, activePkgCount)
 		}

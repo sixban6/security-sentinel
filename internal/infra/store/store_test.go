@@ -56,4 +56,19 @@ func TestMarkdownTriageManualEditAndCircuitBreaker(t *testing.T) {
 	if locked, _ := store.CheckCircuitBreaker("vps1", "CVE-2025-12345"); !locked {
 		t.Fatal("expected 2 consecutive reverts to trigger 24h circuit breaker lockout")
 	}
+
+	// Test Skip-Version Ignore Rule: suppresses skipped version, wakes up on newer version!
+	store.AddIgnoreRule(model.IgnoreRule{
+		HostKey:        "local",
+		VulnID:         "SEC-UPDATE-macos-system",
+		Package:        "macos-system",
+		Mode:           "skip_version",
+		SkippedVersion: "15.8.3",
+	}, 0)
+	if ok, _ := store.MatchIgnoreRule("local", model.VulnerabilityMatch{ID: "SEC-UPDATE-macos-system", Package: "macos-system", FixedVersion: "15.8.3"}); !ok {
+		t.Fatal("expected skip_version rule to suppress 15.8.3")
+	}
+	if ok, _ := store.MatchIgnoreRule("local", model.VulnerabilityMatch{ID: "SEC-UPDATE-macos-system", Package: "macos-system", FixedVersion: "15.8.4"}); ok {
+		t.Fatal("expected skip_version rule to wake up automatically when 15.8.4 is released")
+	}
 }

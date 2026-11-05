@@ -57,6 +57,7 @@ type StateFile struct {
 	Inventories       map[string]InventoryMeta           `yaml:"inventories"`
 	Advisories        map[string]AdvisoryMeta            `yaml:"advisories"`
 	RemediationLedger map[string]model.RemediationRecord `yaml:"remediation_ledger"`
+	IgnoreRules       map[string]model.IgnoreRule        `yaml:"ignore_rules,omitempty"`
 	History           []model.RemediationRecord          `yaml:"history,omitempty"`
 }
 
@@ -106,6 +107,9 @@ func (s *Store) loadStateLocked() StateFile {
 	if st.RemediationLedger == nil {
 		st.RemediationLedger = make(map[string]model.RemediationRecord)
 	}
+	if st.IgnoreRules == nil {
+		st.IgnoreRules = make(map[string]model.IgnoreRule)
+	}
 	return st
 }
 
@@ -150,6 +154,7 @@ func (s *Store) GetInventory(hostKey, currentFingerprint string) (inv *model.Hos
 	if currentFingerprint == "" {
 		return nil, false, false
 	}
+	currentFingerprint = "v27_" + currentFingerprint
 	s.mu.Lock()
 	st := s.loadStateLocked()
 	meta, ok := st.Inventories[hostKey]
@@ -182,6 +187,7 @@ func (s *Store) GetInventory(hostKey, currentFingerprint string) (inv *model.Hos
 
 // SaveInventory persists HostInventory and updates L1 fingerprint metadata.
 func (s *Store) SaveInventory(hostKey, fingerprint string, inv model.HostInventory) error {
+	fingerprint = "v27_" + fingerprint
 	relPath := filepath.Join("inventories", sanitizeFileToken(hostKey)+".yaml")
 	fullPath := filepath.Join(s.dir, relPath)
 	if err := atomicWriteYAML(fullPath, inv); err != nil {

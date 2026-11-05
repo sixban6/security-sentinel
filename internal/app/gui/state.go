@@ -131,6 +131,14 @@ type AppState struct {
 	CVEDaysChoice      string // "近 1 天", "近 3 天", "近 7 天", "近 14 天"
 	CVEListState       ui.ListState
 
+	// Panorama 5-Layer Asset Explorer Modal State
+	ShowAssetExplorer     bool
+	AssetExplorerLayerTab int
+	AssetExplorerHost     string
+	AssetExplorerQuery    string
+	AssetExplorerList     ui.ListState
+	DiscoveredAssetsMap   map[string]model.HostInventory
+
 	// Self-Updater State
 	UpdateChecking bool
 	UpdateApplying bool
@@ -262,6 +270,126 @@ func (s *AppState) RefreshDailyCVEsAsync(forceFresh bool) {
 			}
 		})
 	}()
+}
+
+// MuteSelectedVulnerability adds a Skip-Version / Snooze / Permanent Exemption rule
+// and immediately updates host status, cluster score, menu bar shield, and disk snapshot in 0ms!
+func (s *AppState) MuteSelectedVulnerability(entry SelectedVulnEntry, mode string, snoozeDays int) {
+	rule := s.Mem.AddIgnoreRule(model.IgnoreRule{
+		HostKey:        entry.Host.Target.EffectiveKey(),
+		HostName:       entry.Host.Host,
+		VulnID:         entry.Vuln.EffectiveID(),
+		Package:        entry.Vuln.Package,
+		Mode:           mode,
+		SkippedVersion: entry.Vuln.FixedVersion,
+	}, snoozeDays)
+
+	for hi := range s.Report.Hosts {
+		h := &s.Report.Hosts[hi]
+		if h.Target.EffectiveKey() != entry.Host.Target.EffectiveKey() {
+			continue
+		}
+		var kept []model.VulnerabilityMatch
+		for _, v := range h.Vulnerabilities {
+			if strings.EqualFold(v.EffectiveID(), entry.Vuln.EffectiveID()) && strings.EqualFold(v.Package, entry.Vuln.Package) {
+				v.Status = "已豁免/暂缓"
+				v.Reason = rule.Reason
+				h.IgnoredItems = append(h.IgnoredItems, v)
+				continue
+			}
+			kept = append(kept, v)
+		}
+		h.Vulnerabilities = kept
+		h.UnmitigatedItems = kept
+		recalculateHostPostureAfterMuteChange(h)
+	}
+
+	s.recalculateClusterScore()
+	_ = notify.SaveReport(s.Report, "")
+	if !s.Headless {
+		s.refreshTrayAppearance()
+	}
+}
+
+// UnmuteRuleByKey removes an IgnoreRule and restores any matching IgnoredItems back into active monitoring immediately!
+func (s *AppState) UnmuteRuleByKey(ruleKey string) {
+	s.Mem.RemoveIgnoreRule(ruleKey)
+	for hi := range s.Report.Hosts {
+		h := &s.Report.Hosts[hi]
+		var stillIgnored []model.IgnoreRule
+		_ = stillIgnored
+		var keptIgnored []model.VulnerabilityMatch
+		for _, v := range h.IgnoredItems {
+			if ok, _ := s.Mem.MatchIgnoreRule(h.Target.EffectiveKey(), v); ok {
+				keptIgnored = append(keptIgnored, v)
+			} else {
+				v.Status = ""
+				h.Vulnerabilities = append(h.Vulnerabilities, v)
+			}
+		}
+		h.IgnoredItems = keptIgnored
+		h.UnmitigatedItems = h.Vulnerabilities
+		recalculateHostPostureAfterMuteChange(h)
+	}
+	s.recalculateClusterScore()
+	_ = notify.SaveReport(s.Report, "")
+	if !s.Headless {
+		s.refreshTrayAppearance()
+	}
+}
+
+func recalculateHostPostureAfterMuteChange(h *model.HostAuditResult) {
+	if len(h.Vulnerabilities) == 0 {
+		if len(h.FixedItems) > 0 {
+			h.Status = model.StatusImmunized
+		} else if h.OSContext.RebootRequired {
+			h.Status = model.StatusPendingUpdate
+		} else {
+			h.Status = model.StatusClean
+			h.Detail = fmt.Sprintf("系统、内核与运行态服务 100%% 安全 · 🔕 已豁免/暂缓 %d 项", len(h.IgnoredItems))
+		}
+		h.HealthScore = 100
+		if h.OSContext.RebootRequired {
+			h.HealthScore = 95
+		}
+		return
+	}
+	score := 100
+	allOS := true
+	for _, v := range h.Vulnerabilities {
+		if !v.IsOSPackage {
+			allOS = false
+		}
+		switch v.Severity {
+		case "CRITICAL":
+			score -= 22
+		case "HIGH":
+			score -= 12
+		default:
+			score -= 6
+		}
+	}
+	if score < 15 {
+		score = 15
+	}
+	h.HealthScore = score
+	if allOS {
+		h.Status = model.StatusPendingUpdate
+	} else {
+		h.Status = model.StatusVulnerable
+	}
+}
+
+func (s *AppState) recalculateClusterScore() {
+	if len(s.Report.Hosts) == 0 {
+		s.Report.ClusterScore = 100
+		return
+	}
+	tot := 0
+	for _, h := range s.Report.Hosts {
+		tot += h.HealthScore
+	}
+	s.Report.ClusterScore = tot / len(s.Report.Hosts)
 }
 
 // PushDailyCVEDigestToTelegramAsync sends the standalone categorized CVE digest message to Telegram on demand.

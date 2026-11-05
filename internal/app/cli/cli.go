@@ -79,6 +79,12 @@ func Main() {
 		runWorkspaceDeps(ctx, restArgs)
 	case "clean-venvs", "clean-venv":
 		runCleanOrphanedVenvs(restArgs)
+	case "mute", "ignore":
+		runMute(restArgs)
+	case "unmute":
+		runUnmute(restArgs)
+	case "assets":
+		runAssets(restArgs)
 	default:
 		fmt.Fprintf(os.Stderr, "❌ 未知子命令: %s\n\n", subcmd)
 		printMainUsage()
@@ -124,6 +130,8 @@ func printMainUsage() {
 核心子命令 (含极速简写):
   audit / scan     执行端到端安全巡检 (含 Apple macOS 系统更新、Linux 多分支内核与运行态服务闭环)
   deps / ws        查看按「活跃项目 ➔ 待升级包」两级折叠的开发工作区依赖体检 (--all 含归档, --fix 一键升级)
+  assets           查看五层全景资产清单浏览器 (--layer brew|docker|tools|os|workspace -q <关键词>)
+  mute / unmute    对暂不想升级的项目配置「跳过当前版本 / 暂缓 N 天 / 永久豁免」或恢复监控
   clean-venvs      检测原项目已删除或闲置多年的孤儿僵尸虚拟环境 (--apply 安全移入系统废纸篓)
   doctor / doc     一键并发诊断全集群 SSH 免密、提权能力、网络情报源与钥匙串状态
   fix              定向执行操作系统与基础库安全修补 (支持 --dry-run 变更预览)

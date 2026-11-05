@@ -44,17 +44,18 @@ var openwrtSecurityWhitelist = map[string]string{
 	"sing-box":           "/etc/init.d/sing-box reload",
 }
 
-// Safe foundational security packages on macOS (excludes breaking runtime upgrades like node/go/python).
+// Foundational network, crypto, container, database, and system tools on macOS Homebrew
+// (excludes breaking major language compiler upgrades like python@*, node, go unless user runs brew upgrade).
 var darwinSafeSecurityWhitelist = map[string]bool{
-	"openssl":         true,
-	"openssl@3":       true,
-	"openssl@1.1":     true,
-	"curl":            true,
-	"ca-certificates": true,
-	"gnupg":           true,
-	"libssh2":         true,
-	"nghttp2":         true,
-	"openssh":         true,
+	"openssl": true, "openssl@3": true, "openssl@1.1": true, "libressl": true,
+	"curl": true, "wget": true, "ca-certificates": true, "gnupg": true,
+	"openssh": true, "libssh2": true, "nghttp2": true, "git": true, "git-lfs": true,
+	"nginx": true, "caddy": true, "haproxy": true, "traefik": true,
+	"redis": true, "postgresql": true, "postgresql@16": true, "postgresql@15": true, "mariadb": true, "sqlite": true,
+	"ffmpeg": true, "imagemagick": true, "libxml2": true, "xz": true, "zstd": true,
+	"jq": true, "vim": true, "neovim": true, "tmux": true,
+	"colima": true, "podman": true, "lima": true, "qemu": true,
+	"wireguard-tools": true, "dnsmasq": true, "unbound": true, "wstunnel": true, "cloudflared": true,
 }
 
 // ScanOSSecurity executes read-only OS update simulation, enriches CVEs via OSV, and builds a safe RemediationPlan.
@@ -72,7 +73,8 @@ func ScanOSSecurity(ctx context.Context, exec transport.Executor, osCtx model.OS
 	case osCtx.OSFamily == "rhel" || osCtx.PkgMgr == "dnf" || osCtx.PkgMgr == "yum":
 		updates = checkDnfSecurityUpdates(ctx, exec, osCtx)
 	case osCtx.OSFamily == "darwin":
-		updates = checkDarwinSecurityUpdates(ctx, exec, osCtx)
+		updates = checkDarwinSecurityUpdates(ctx, exec, &osCtx)
+		report.OSContext = osCtx
 	}
 
 	// Enrich CVE IDs and CVSS severity via Google OSV batch API
@@ -339,12 +341,14 @@ func checkOpenWrtOrAPKUpdates(ctx context.Context, exec transport.Executor, osCt
 	return updates
 }
 
-func checkDarwinSecurityUpdates(ctx context.Context, exec transport.Executor, osCtx model.OSContext) []model.OSSecurityUpdate {
+func checkDarwinSecurityUpdates(ctx context.Context, exec transport.Executor, osCtx *model.OSContext) []model.OSSecurityUpdate {
 	var updates []model.OSSecurityUpdate
 
-	// 1. Official Apple macOS Software Update / Rapid Security Response / Command Line Tools check (5ms XML1 read!)
+	// 1. Official Apple macOS Software Update / Rapid Security Response / Command Line Tools check:
+	// Strictly separate same-branch security patches/RSRs from cross-generational `_major` OS upgrades!
 	appleRes, err := exec.Run(ctx, "plutil -extract RecommendedUpdates xml1 -o - /Library/Preferences/com.apple.SoftwareUpdate.plist 2>/dev/null || true", 4*time.Second)
 	if err == nil && strings.Contains(appleRes.Stdout, "<dict>") {
+		curMajor := leadingMajorInt(osCtx.DistroVersion)
 		for _, item := range parseAppleRecommendedUpdatesXML(appleRes.Stdout) {
 			dispName := item["Display Name"]
 			dispVer := item["Display Version"]
@@ -356,15 +360,25 @@ func checkDarwinSecurityUpdates(ctx context.Context, exec transport.Executor, os
 			if dispVer == "" {
 				dispVer = dispName
 			}
+
+			// Detect cross-generational major OS upgrade (e.g. macOS 15.8.2 -> 27.2 `_major`):
+			// Record calmly as informational metadata without raising a false-positive security vulnerability!
+			candMajor := leadingMajorInt(dispVer)
+			isMajorOSJump := strings.HasSuffix(strings.ToLower(ident), "_major") ||
+				(isMSU && curMajor > 0 && candMajor > curMajor)
+			if isMajorOSJump {
+				osCtx.OptionalMajorUpgrade = firstNonEmptyOSVer(dispName, "macOS "+dispVer)
+				continue
+			}
+
 			pkgName := "macos-software-update"
 			instVer := firstNonEmptyOSVer(osCtx.DistroVersion, "current")
 			remCmd := fmt.Sprintf("softwareupdate -i %s", transport.ShellQuote(firstNonEmptyOSVer(item["Product Key"], dispName)))
-			summary := fmt.Sprintf("Apple 官方安全与软件更新: %s (%s)", firstNonEmptyOSVer(dispName, ident), dispVer)
+			summary := fmt.Sprintf("Apple 官方安全与组件补丁: %s (%s)", firstNonEmptyOSVer(dispName, ident), dispVer)
 			if isMSU || strings.Contains(strings.ToLower(dispName), "macos") {
 				pkgName = "macos-system"
-				// On Apple Silicon, macOS OS/RSR updates require Volume Owner Touch ID / password in System Settings
 				remCmd = `open "x-apple.systempreferences:com.apple.Software-Update-Settings.extension"`
-				summary = fmt.Sprintf("Apple macOS 系统安全更新就绪: %s (当前 %s ➔ %s，需前往系统设置确认重启升级)", dispName, instVer, dispVer)
+				summary = fmt.Sprintf("Apple 当前分支安全补丁就绪: %s (当前 %s ➔ %s)", dispName, instVer, dispVer)
 			}
 			updates = append(updates, model.OSSecurityUpdate{
 				Package:          pkgName,
@@ -426,6 +440,22 @@ func firstNonEmptyOSVer(a, b string) string {
 		return strings.TrimSpace(a)
 	}
 	return strings.TrimSpace(b)
+}
+
+func leadingMajorInt(ver string) int {
+	ver = strings.TrimSpace(ver)
+	dot := strings.IndexByte(ver, '.')
+	if dot > 0 {
+		ver = ver[:dot]
+	}
+	n := 0
+	for i := 0; i < len(ver); i++ {
+		if ver[i] < '0' || ver[i] > '9' {
+			break
+		}
+		n = n*10 + int(ver[i]-'0')
+	}
+	return n
 }
 
 var (

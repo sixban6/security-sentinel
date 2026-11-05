@@ -3,7 +3,7 @@ package model
 import "time"
 
 // Version is stamped via -ldflags during release builds.
-var Version = "2.6.0"
+var Version = "2.7.0"
 
 // Standard 6-state host security statuses (backwards-compatible with v1 labels).
 const (
@@ -164,10 +164,11 @@ type OSContext struct {
 	OverlayTotalMB  float64 `json:"overlay_total_mb,omitempty" yaml:"overlay_total_mb,omitempty"`
 	IsFlashStorage  bool    `json:"is_flash_storage" yaml:"is_flash_storage"`
 	LockdownMode    bool    `json:"lockdown_mode" yaml:"lockdown_mode"`
-	LockdownReason  string  `json:"lockdown_reason,omitempty" yaml:"lockdown_reason,omitempty"`
-	RebootRequired  bool    `json:"reboot_required" yaml:"reboot_required"`
-	IsRoot          bool    `json:"is_root" yaml:"is_root"`
-	CanSudoNoPass   bool    `json:"can_sudo_nopass" yaml:"can_sudo_nopass"`
+	LockdownReason       string  `json:"lockdown_reason,omitempty" yaml:"lockdown_reason,omitempty"`
+	RebootRequired       bool    `json:"reboot_required" yaml:"reboot_required"`
+	OptionalMajorUpgrade string  `json:"optional_major_upgrade,omitempty" yaml:"optional_major_upgrade,omitempty"`
+	IsRoot               bool    `json:"is_root" yaml:"is_root"`
+	CanSudoNoPass        bool    `json:"can_sudo_nopass" yaml:"can_sudo_nopass"`
 }
 
 // OSSecurityUpdate represents an actionable distro/package-manager security patch.
@@ -207,21 +208,28 @@ type OSSecurityReport struct {
 	Error              string             `json:"error,omitempty" yaml:"error,omitempty"`
 }
 
-// EcosystemSummary summarizes workspace and container assets discovered on a host.
+// EcosystemSummary summarizes 5-layer host, container, toolchain, and workspace assets discovered on a host.
 type EcosystemSummary struct {
-	PythonVenvs      int    `json:"python_venvs" yaml:"python_venvs"`
-	NodeProjects     int    `json:"node_projects" yaml:"node_projects"`
-	GoModules        int    `json:"go_modules" yaml:"go_modules"`
-	RustCrates       int    `json:"rust_crates" yaml:"rust_crates"`
-	JavaJDKs         int    `json:"java_jdks" yaml:"java_jdks"`
-	JavaProjects     int    `json:"java_projects" yaml:"java_projects"`
-	JavaWrappers     int    `json:"java_wrappers" yaml:"java_wrappers"`
-	PHPProjects      int    `json:"php_projects" yaml:"php_projects"`
-	RubyProjects     int    `json:"ruby_projects" yaml:"ruby_projects"`
-	DotnetProjects   int    `json:"dotnet_projects" yaml:"dotnet_projects"`
-	SwiftProjects    int    `json:"swift_projects" yaml:"swift_projects"`
-	DockerContainers int    `json:"docker_containers" yaml:"docker_containers"`
-	Kernel           string `json:"kernel,omitempty" yaml:"kernel,omitempty"`
+	HomebrewFormulae int      `json:"homebrew_formulae" yaml:"homebrew_formulae"`
+	HomebrewCasks    int      `json:"homebrew_casks" yaml:"homebrew_casks"`
+	MacApps          int      `json:"mac_apps" yaml:"mac_apps"`
+	DockerContainers int      `json:"docker_containers" yaml:"docker_containers"`
+	DockerImages     int      `json:"docker_images" yaml:"docker_images"`
+	DockerVersion    string   `json:"docker_version,omitempty" yaml:"docker_version,omitempty"`
+	GlobalTools      int      `json:"global_tools" yaml:"global_tools"`
+	Toolchains       []string `json:"toolchains,omitempty" yaml:"toolchains,omitempty"`
+	PythonVenvs      int      `json:"python_venvs" yaml:"python_venvs"`
+	NodeProjects     int      `json:"node_projects" yaml:"node_projects"`
+	GoModules        int      `json:"go_modules" yaml:"go_modules"`
+	RustCrates       int      `json:"rust_crates" yaml:"rust_crates"`
+	JavaJDKs         int      `json:"java_jdks" yaml:"java_jdks"`
+	JavaProjects     int      `json:"java_projects" yaml:"java_projects"`
+	JavaWrappers     int      `json:"java_wrappers" yaml:"java_wrappers"`
+	PHPProjects      int      `json:"php_projects" yaml:"php_projects"`
+	RubyProjects     int      `json:"ruby_projects" yaml:"ruby_projects"`
+	DotnetProjects   int      `json:"dotnet_projects" yaml:"dotnet_projects"`
+	SwiftProjects    int      `json:"swift_projects" yaml:"swift_projects"`
+	Kernel           string   `json:"kernel,omitempty" yaml:"kernel,omitempty"`
 }
 
 // HostInventory is the complete discovered profile of a single host.
@@ -346,10 +354,11 @@ type HostAuditResult struct {
 	HealthScore             int                  `json:"health_score" yaml:"health_score"`
 	LatencyMS               int64                `json:"latency_ms" yaml:"latency_ms"`
 	CVEs                    []string             `json:"cves,omitempty" yaml:"cves,omitempty"`
-	Vulnerabilities         []VulnerabilityMatch `json:"vulnerabilities" yaml:"vulnerabilities"`
-	UnmitigatedItems        []VulnerabilityMatch `json:"unmitigated_items,omitempty" yaml:"unmitigated_items,omitempty"`
-	FixedItems              []VulnerabilityMatch `json:"fixed_items,omitempty" yaml:"fixed_items,omitempty"`
-	MitigatedVulnerabilities []VulnerabilityMatch `json:"mitigated_vulnerabilities,omitempty" yaml:"mitigated_vulnerabilities,omitempty"`
+	Vulnerabilities          []VulnerabilityMatch    `json:"vulnerabilities" yaml:"vulnerabilities"`
+	UnmitigatedItems         []VulnerabilityMatch    `json:"unmitigated_items,omitempty" yaml:"unmitigated_items,omitempty"`
+	FixedItems               []VulnerabilityMatch    `json:"fixed_items,omitempty" yaml:"fixed_items,omitempty"`
+	IgnoredItems             []VulnerabilityMatch    `json:"ignored_items,omitempty" yaml:"ignored_items,omitempty"`
+	MitigatedVulnerabilities []VulnerabilityMatch    `json:"mitigated_vulnerabilities,omitempty" yaml:"mitigated_vulnerabilities,omitempty"`
 	RetirableMitigations    []string             `json:"retirable_mitigations,omitempty" yaml:"retirable_mitigations,omitempty"`
 	PackagesCount           int                  `json:"packages_count" yaml:"packages_count"`
 	AssetsCount             int                  `json:"assets_count" yaml:"assets_count"`
@@ -424,4 +433,18 @@ type RemediationRecord struct {
 	LockoutUntil int64  `json:"lockout_until" yaml:"lockout_until"`
 	UpdatedAt    string `json:"updated_at" yaml:"updated_at"`
 	Log          string `json:"log,omitempty" yaml:"log,omitempty"`
+}
+
+// IgnoreRule represents a user-defined mute / skip-version / temporary snooze rule on a vulnerability or update.
+type IgnoreRule struct {
+	Key            string `json:"key" yaml:"key"`
+	HostKey        string `json:"host_key" yaml:"host_key"`
+	HostName       string `json:"host_name" yaml:"host_name"`
+	VulnID         string `json:"vuln_id" yaml:"vuln_id"`
+	Package        string `json:"package" yaml:"package"`
+	Mode           string `json:"mode" yaml:"mode"` // "skip_version", "snooze", "permanent"
+	SkippedVersion string `json:"skipped_version,omitempty" yaml:"skipped_version,omitempty"`
+	ExpiresAt      string `json:"expires_at,omitempty" yaml:"expires_at,omitempty"`
+	Reason         string `json:"reason,omitempty" yaml:"reason,omitempty"`
+	CreatedAt      string `json:"created_at" yaml:"created_at"`
 }
