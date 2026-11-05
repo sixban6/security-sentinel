@@ -11,7 +11,7 @@
 [![Platform](https://img.shields.io/badge/Platform-macOS_%7C_Linux_%7C_Windows_%7C_OpenWrt-f59e0b?style=flat-square)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-3b82f6?style=flat-square)](LICENSE)
 
-[**为什么需要它 (Why)**](#-why为什么现有的安全工具让你既焦虑又疲惫) · [**30 秒极速上手 (How)**](#-how30-秒极速上手) · [**核心产品体验 (What)**](#-what一核三端的全场景产品体验) · [**底层工程揭秘**](#-底层揭秘为什么能做到快准稳) · [**命令速查 (`sectl`)**](#️-命令行全景速查-sectl) · [**进阶文档**](#-进阶架构指南)
+[**为什么需要它 (Why)**](#-why为什么现有的安全工具让你既焦虑又疲惫) · [**30 秒极速上手 (How)**](#-how30-秒极速上手) · [**核心产品体验 (What)**](#-what一核三端的全场景产品体验) · [**命令速查 (`sectl`)**](#️-命令行全景速查-sectl) · [**进阶文档**](#-进阶架构指南)
 
 <br/>
 
@@ -115,41 +115,6 @@ sectl cve
 ### 3. 7.5MB 静态 CLI (`sectl`) & AI Agent 技能
 - 零外部依赖单文件交叉编译直跑 macOS / Linux / Windows / **OpenWrt (`mipsle`/`arm64`)**；
 - 内置 [`SKILL.md`](SKILL.md)，一键注册为 Google `agy` / Claude Code 的系统级主动安全闭环技能。
-
----
-
-## 🧠 底层揭秘：为什么能做到“快、准、稳”？
-
-```mermaid
-flowchart LR
-    subgraph Targets["五层全景被守护资产 (0 Agent)"]
-        LOCAL["💻 本地五层资产<br/>OS · Brew · Docker · 全局工具 · 项目锁文件"]
-        OPENWRT["📡 边缘软路由<br/>OpenWrt / Alpine (Clash API)"]
-        CLOUD["☁️ 云服务器集群<br/>Debian / Ubuntu / RHEL"]
-    end
-
-    subgraph Core["Security-Sentinel 纯 Go 5层领域引擎"]
-        PROBE["⚡ 单连接合并探针<br/>/tmp 短路径 SSH 连接池复用"]
-        MATCH["🎯 双轨精确比对引擎<br/>Debian/APK/SemVer/多分支内核 + 豁免账本"]
-        GUARD["🛡️ 安全事务自愈器<br/>防变砖熔断 · 静态门禁 · 断网秒级回滚"]
-    end
-
-    subgraph Feeds["多源实时安全情报流"]
-        OSV["Google OSV Batch API<br/>(全量历史存量漏洞)"]
-        GHSA["GitHub Advisories<br/>(12 大语言生态实时流)"]
-        OSKERNEL["NIST NVD + Debian/Ubuntu/RHEL<br/>(Linux 内核与发行版实时通告)"]
-    end
-
-    Feeds --> MATCH
-    Targets <-->|"1 次握手极速画像"| PROBE --> MATCH --> GUARD
-    GUARD -->|"先旁路切流，再滚动重启"| OPENWRT
-    GUARD -->|"定向热升级 / 双脚本规避"| CLOUD
-    GUARD -->|"菜单栏盾牌 + Diff 手术台 + TG 双卡片"| User(("👤 管理员"))
-```
-
-1. **快 10 倍**：建立 `/tmp/ss-<uid>` 私有 `ControlMaster` 连接复用，将环境自省、硬件水位、源码包映射、运行内核、容器镜像压缩为**单次只读流**分段解析，跨国高延迟节点 1~2 秒完成画像。
-2. **零误报、零漏报**：内置符合 Debian Policy（含 `epoch` 与 `~` 序）、APK `-rN`、PEP 440、SemVer、FIRST.org CVSS v3.1 向量计算器与 **Linux 内核多 LTS 分支（5.10/5.15/6.1/6.6/6.12）** 的专用比较引擎。
-3. **四道生产安全护栏**：`audit` 默认 100% 只读；OpenWrt 内存 `<32MB` / Flash `<30MB` 物理防变砖硬熔断；Gemini 双脚本经 `sh -n`、高危指令黑名单与 BusyBox `ash` 兼容性门禁校验；远端部署后多路探活失联**本地秒级自动回滚** + 连续失败 24 小时熔断锁。
 
 ---
 
