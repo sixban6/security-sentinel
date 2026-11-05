@@ -1,0 +1,23 @@
+{
+  "name": "Security Sentinel",
+  "identifier": "com.sixban6.security-sentinel",
+  "version": "2.6.0",
+  "copyright": "Copyright (c) 2026 Security Sentinel Contributors",
+  "main": "./cmd/sentinel-app",
+  "out": "build",
+  "urlSchemes": ["sentinel"],
+  "macos": {
+    "minimumSystemVersion": "12.0",
+    "dmgTitle": "Security Sentinel",
+    "infoPlist": {
+      "LSUIElement": true,
+      "NSAppleEventsUsageDescription": "Security Sentinel 需要调用您的终端应用以一键打开远程服务器 SSH 会话。"
+    }
+  },
+  "linux": {
+    "webview": false,
+    "command": "sentinel-app",
+    "comment": "Proactive multi-host vulnerability monitor and zero-downtime remediation",
+    "categories": ["System", "Security", "Utility"]
+  }
+}

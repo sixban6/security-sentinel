@@ -1,0 +1,106 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build & publish (e.g. v2.0.0)"
+        required: true
+        default: "v2.0.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build-cli:
+    name: Build Static CLI Binaries
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Cross-compile zero-CGO CLI binaries (sectl)
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            TAG="${{ inputs.tag }}"
+          fi
+          VER="${TAG#v}"
+          LDFLAGS="-s -w -X github.com/sixban6/security-sentinel/internal/infra/model.Version=${VER}"
+          mkdir -p dist-cli
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags="${LDFLAGS}" -o dist-cli/sectl-darwin-arm64 ./cmd/sectl
+          CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags="${LDFLAGS}" -o dist-cli/sectl-darwin-amd64 ./cmd/sectl
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="${LDFLAGS}" -o dist-cli/sectl-linux-amd64 ./cmd/sectl
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="${LDFLAGS}" -o dist-cli/sectl-linux-arm64 ./cmd/sectl
+          CGO_ENABLED=0 GOOS=linux GOARCH=mipsle GOMIPS=softfloat go build -trimpath -ldflags="${LDFLAGS}" -o dist-cli/sectl-openwrt-mipsle ./cmd/sectl
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="${LDFLAGS}" -o dist-cli/sectl-windows-amd64.exe ./cmd/sectl
+
+      - name: Upload CLI artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-binaries
+          path: dist-cli/*
+
+  build-macos-app:
+    name: Build macOS Native GPU App (.dmg & .app.tar.gz)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install MyGo CLI & Build App Bundles
+        run: |
+          go install github.com/egoist/mygo/cmd/mygo@latest
+          "$(go env GOPATH)/bin/mygo" build -platform "darwin/arm64,darwin/amd64"
+          mkdir -p dist-app
+          for arch in arm64 amd64; do
+            if [[ -d "build/darwin-${arch}/Security Sentinel.app" ]]; then
+              tar -czf "dist-app/Security-Sentinel-darwin-${arch}.app.tar.gz" -C "build/darwin-${arch}" "Security Sentinel.app"
+            fi
+            for dmg in build/darwin-${arch}/*.dmg; do
+              [[ -f "$dmg" ]] && cp "$dmg" "dist-app/Security-Sentinel-darwin-${arch}.dmg"
+            done
+          done
+
+      - name: Upload macOS App artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-app-bundles
+          path: dist-app/*
+
+  publish-release:
+    name: Generate SHA-256 Checksums & Publish GitHub Release
+    needs: [build-cli, build-macos-app]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-staging
+          merge-multiple: true
+
+      - name: Generate unified checksums.txt
+        run: |
+          cd release-staging
+          sha256sum * > checksums.txt
+          cat checksums.txt
+
+      - name: Publish to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: release-staging/*
+          generate_release_notes: true

@@ -1,0 +1,60 @@
+# Go binaries & build artifacts
+/bin/
+/build/
+/dist/
+/.mygo/
+/sectl
+/security-sentinel
+/sentinel-app
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.txt
+coverage.html
+
+# IDE & Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Project logs, reports & local status
+*.log
+logs/
+latest_status.json
+sentinel_report*.html
+tmp/
+temp/
+
+# Sentinel Local Cache, Secrets & Memory (Strict Privacy Guard)
+.sentinel_memory/
+sentinel_memory/
+cache/
+.cache/
+triage/
+inventories/
+advisories/
+state.yaml
+discovered_inventory.yaml
+applied_mitigations.json
+credentials.json
+mygo-update.key
+
+# User custom environment configuration
+sentinel.yaml
+sentinel.yml
+sentinel.json
+!sentinel.example.yaml

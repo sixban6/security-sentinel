@@ -1,0 +1,55 @@
+# ==============================================================================
+# Security-Sentinel v2.0 集群配置 (sentinel.yaml)
+#
+# 极简设计：远程机器默认走系统 SSH 密钥免密连接（原生复用 ~/.ssh/config 与跳板机）！
+# 操作系统发行版、包管理器、运行内核、Docker 容器、开发工作区依赖锁文件全部自动探测。
+# 敏感凭据（Telegram Token / AI API Key / GitHub Token）优先托管于系统钥匙串 (Keychain)。
+# ==============================================================================
+
+# 1. 待守护主机清单（本机默认自动置顶纳管，无需重复填写）
+hosts:
+  - root@1.2.3.4
+  - ubuntu@5.6.7.8
+  # 支持对象格式自定义显示名称、非标端口与私钥路径:
+  # - name: "生产 Web 节点"
+  #   user: ubuntu
+  #   host: 192.168.1.100
+  #   port: 2222
+
+# 2. 漏洞情报检索策略（OSV 全量资产库 + GitHub GHSA + Linux CNA 多分支引擎）
+advisories:
+  days: 3                          # 增量通告回溯天数（存量漏洞由 OSV 批量引擎全量覆盖）
+  include_kernel: true             # 是否纳入 Linux 内核多 LTS 分支监控
+  osv_enabled: true                # 开启 Google OSV 全量存量漏洞比对
+
+# 3. 操作系统与基础库自动修补策略（默认 false 保持 audit 100% 安全只读）
+auto_fix:
+  enabled: false                   # 设为 true 或追加 --fix 时，自动定向安装官方安全更新
+  mode: "safe-os"                  # safe-os: 仅修补无破坏性安全补丁 (带防级联卸载与 OpenWrt 防变砖锁)
+
+# 4. AI 智能体无补丁高危漏洞现场规避（默认选择 gemini，支持 Gemini / OpenAI / Anthropic API 及本地 agy）
+ai_remediation:
+  enabled: false                   # 是否开启无官方补丁时的 AI 现场规避研判
+  provider: "gemini"               # gemini (默认) | agy | openai | anthropic | auto
+  model: "gemini-2.5-flash"        # 模型名称 (agy 模式可用 gemini-3.8-flash-high)
+  auto_execute: false              # false: 在 GUI Diff 台或终端预览待批; true: 自动下发并断网秒回滚
+
+# 5. 通知与智能降噪策略
+notifications:
+  policy: "always"                 # always | on_change (状态变化才推送) | critical_only
+  desktop: true                    # 发送原生桌面通知
+
+# 6. 零中断旁路网关切流与平滑滚动重启（可选，无软路由切流需求保持 false 即可）
+gateway:
+  enabled: false
+  ssh_host: ""
+  clash_api_url: "http://127.0.0.1:9090"
+  selector_group: "Proxy"
+  reload_commands: []
+
+rolling_nodes: []
+
+# 7. 本地开发工作区目录（自动解析项目内 .venv、package-lock、pnpm-lock、go.mod、Cargo.lock 等）
+workspaces:
+  - ~/Projects
+  - ~/workspace
