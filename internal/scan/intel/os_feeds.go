@@ -335,7 +335,7 @@ func (c *Client) FetchNVDLinuxKernelAdvisories(ctx context.Context, days int) ma
 	now := time.Now().UTC()
 	startDT := now.Add(-time.Duration(days)*24*time.Hour).Format("2006-01-02") + "T00:00:00.000"
 	endDT := now.Format("2006-01-02") + "T23:59:59.000"
-	u := fmt.Sprintf("%s?keywordSearch=Linux%%20kernel&pubStartDate=%s&pubEndDate=%s&resultsPerPage=25",
+	u := fmt.Sprintf("%s?keywordSearch=Linux%%20kernel&pubStartDate=%s&pubEndDate=%s&resultsPerPage=200",
 		strings.TrimRight(c.NVDBaseURL, "/"),
 		startDT,
 		endDT,

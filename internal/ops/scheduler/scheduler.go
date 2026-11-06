@@ -434,27 +434,39 @@ func Install(opts InstallOptions) (ScheduleStatus, error) {
 	}, nil
 }
 
-// RetireLegacyMacOSLaunchd unloads and removes any leftover v1 macOS LaunchAgent plist
+func legacyLaunchdPlistPaths() []string {
+	paths := []string{launchdPlistPath()}
+	if matches, err := filepath.Glob(config.ExpandHome("~/Library/LaunchAgents/*.agy.daily-security-audit.plist")); err == nil {
+		paths = append(paths, matches...)
+	}
+	return paths
+}
+
+// RetireLegacyMacOSLaunchd unloads and removes any leftover v1/agy macOS LaunchAgent plists
 // so the native Menu Bar App's built-in smart scheduler never collides with a duplicate launchd job.
 func RetireLegacyMacOSLaunchd() bool {
 	if runtime.GOOS != "darwin" {
 		return false
 	}
-	plistPath := launchdPlistPath()
-	if _, err := os.Stat(plistPath); err != nil {
-		return false
+	retired := false
+	for _, plistPath := range legacyLaunchdPlistPaths() {
+		if _, err := os.Stat(plistPath); err != nil {
+			continue
+		}
+		_ = exec.Command("launchctl", "unload", plistPath).Run()
+		_ = os.Remove(plistPath)
+		retired = true
 	}
-	_ = exec.Command("launchctl", "unload", plistPath).Run()
-	_ = os.Remove(plistPath)
-	return true
+	return retired
 }
 
 func Uninstall() error {
 	if runtime.GOOS == "darwin" {
-		plistPath := launchdPlistPath()
-		if _, err := os.Stat(plistPath); err == nil {
-			_ = exec.Command("launchctl", "unload", plistPath).Run()
-			_ = os.Remove(plistPath)
+		for _, plistPath := range legacyLaunchdPlistPaths() {
+			if _, err := os.Stat(plistPath); err == nil {
+				_ = exec.Command("launchctl", "unload", plistPath).Run()
+				_ = os.Remove(plistPath)
+			}
 		}
 	}
 	if curOut, err := exec.Command("crontab", "-l").Output(); err == nil {

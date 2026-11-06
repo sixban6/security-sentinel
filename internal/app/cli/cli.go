@@ -181,6 +181,8 @@ func runAudit(ctx context.Context, cfgPath string, args []string) {
 	noCache := fs.Bool("no-cache", false, "完全停用所有本地缓存冷启动运行")
 	htmlOut := fs.String("html", "", "同时导出单文件 HTML 安全审计战报到指定路径")
 	asJSON := fs.Bool("json", false, "以 JSON 格式打印完整审计报告")
+	noNotify := fs.Bool("no-notify", false, "仅落盘状态快照，不发送桌面与 Telegram 推送通知")
+	quietAlias := fs.Bool("quiet", false, "同 --no-notify")
 	statusFile := fs.String("status-file", config.PrimaryStatusFile(), "状态落盘 JSON 路径")
 	_ = fs.Parse(args)
 
@@ -228,7 +230,7 @@ func runAudit(ctx context.Context, cfgPath string, args []string) {
 		UseInvCache:     !*noCache && !*freshInv,
 		UseAICache:      !*noCache && !*freshAI,
 		StatusFile:      *statusFile,
-		QuietNotify:     *asJSON,
+		QuietNotify:     *asJSON || *noNotify || *quietAlias,
 		OnLog: func(line string) {
 			if !*asJSON {
 				fmt.Println(line)
@@ -461,25 +463,33 @@ func runDoctor(ctx context.Context, cfgPath string, args []string) {
 
 func runAdvisories(ctx context.Context, cfgPath string, args []string) {
 	fs := flag.NewFlagSet("cve", flag.ExitOnError)
-	days := fs.Int("days", 0, "检索近 N 天通告 (默认 3 天)")
+	days := fs.Int("days", 0, "检索近 N 天通告 (不传默认展示并推送当天+昨天)")
 	category := fs.String("category", "all", "领域分类过滤: all | language | os | kernel")
 	severity := fs.String("severity", "all", "重要性分级过滤: all | CRITICAL | HIGH | MEDIUM")
 	eco := fs.String("eco", "", "按具体生态或发行版过滤 (如 PyPI, npm, Maven, Go, Debian, Ubuntu, RHEL)")
 	query := fs.String("q", "", "按 CVE 编号、包名或关键词搜索")
 	limit := fs.Int("limit", 40, "终端每个分区或列表最多展示条数")
-	pushTG := fs.Bool("push", false, "将每日最新 CVE 按分类单独推送一条日报卡片至 Telegram 机器人")
+	pushTG := fs.Bool("push", false, "将每日最新 CVE (默认当天+昨天) 按分类单独推送一条日报卡片至 Telegram")
 	asJSON := fs.Bool("json", false, "输出 JSON")
 	fresh := fs.Bool("fresh", false, "跳过本地缓存强制实时拉取")
 	_ = fs.Parse(args)
 
 	cfg := loadCfgOrWarn(cfgPath)
-	d := *days
-	if d <= 0 {
-		d = cfg.Advisories.Days
+	fetchDays := *days
+	if fetchDays <= 0 {
+		fetchDays = max(2, cfg.Advisories.Days)
 	}
 	mem := store.New("")
 	cli := intel.NewClient(mem)
-	advs, _ := cli.FetchAllAdvisories(ctx, d, true, !*fresh)
+	advs, _ := cli.FetchAllAdvisories(ctx, fetchDays, true, !*fresh)
+
+	now := time.Now()
+	windowDesc := fmt.Sprintf("近 %d 天", *days)
+	if *days <= 0 {
+		advs = notify.FilterAdvisoriesTodayAndYesterday(advs, now)
+		todayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+		windowDesc = fmt.Sprintf("%s ~ %s · 昨今两日", todayStart.AddDate(0, 0, -1).Format("01-02"), todayStart.Format("01-02"))
+	}
 
 	catNorm := strings.ToLower(strings.TrimSpace(*category))
 	if catNorm == "lang" || catNorm == "languages" {
@@ -488,7 +498,7 @@ func runAdvisories(ctx context.Context, cfgPath string, args []string) {
 	list := notify.FilterAdvisories(advs, catNorm, *severity, *eco, *query)
 
 	if *pushTG {
-		sent, err := notify.SendDailyCVEDigest(ctx, advs, d, true)
+		sent, err := notify.SendDailyCVEDigest(ctx, advs, *days, true)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "❌ Telegram 推送失败: %v\n", err)
 			os.Exit(1)
@@ -497,7 +507,7 @@ func runAdvisories(ctx context.Context, cfgPath string, args []string) {
 			fmt.Fprintln(os.Stderr, "⚠️ 未检测到 Telegram Bot 配置，请先运行 `sectl pair` 或在桌面端设置页绑定。")
 			os.Exit(1)
 		}
-		fmt.Printf("✈️ 已成功将近 %d 天的分类 CVE 情报日报单独推送至 Telegram！(共 %d 条)\n", d, len(list))
+		fmt.Printf("✈️ 已成功将 [%s] 的分类 CVE 情报日报单独推送至 Telegram！(共 %d 条)\n", windowDesc, len(list))
 		if !*asJSON && *category == "all" && *severity == "all" && *eco == "" && *query == "" {
 			return
 		}
@@ -510,7 +520,7 @@ func runAdvisories(ctx context.Context, cfgPath string, args []string) {
 		return
 	}
 
-	fmt.Printf("📡 每日最新 CVE 情报雷达 (近 %d 天 · 匹配 %d 条)\n", d, len(list))
+	fmt.Printf("📡 每日最新 CVE 情报雷达 (%s · 匹配 %d 条)\n", windowDesc, len(list))
 	fmt.Println(strings.Repeat("=", 72))
 
 	if catNorm == "all" && *eco == "" && *query == "" {

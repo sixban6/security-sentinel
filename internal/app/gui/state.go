@@ -128,7 +128,7 @@ type AppState struct {
 	CVESeverityTab     int    // 0: All, 1: CRITICAL, 2: HIGH, 3: MEDIUM
 	CVEEcosystemChoice string // "全部生态" or specific ecosystem
 	CVESearchQuery     string
-	CVEDaysChoice      string // "近 1 天", "近 3 天", "近 7 天", "近 14 天"
+	CVEDaysChoice      string // "昨今两日", "近 1 天", "近 3 天", "近 7 天", "近 14 天"
 	CVEListState       ui.ListState
 
 	// Panorama 5-Layer Asset Explorer Modal State
@@ -207,7 +207,7 @@ func NewAppState(cfgPath string, headless bool) *AppState {
 		WorkspaceJobStatus: make(map[string]string),
 		DailyAdvisories:    make(map[string]model.Advisory),
 		CVEEcosystemChoice: "全部生态",
-		CVEDaysChoice:      fmt.Sprintf("近 %d 天", max(1, cfg.Advisories.Days)),
+		CVEDaysChoice:      "昨今两日",
 		ScanModeLabel:     scanModeToLabel(cfg.Notifications.ScanMode),
 		ScanIntervalLabel: hoursToIntervalLabel(cfg.Notifications.AutoScanHours),
 		DailyScanTimeStr:  firstNonEmptyStr(cfg.Notifications.DailyScanTime, "09:00"),
@@ -241,6 +241,23 @@ func NewAppState(cfgPath string, headless bool) *AppState {
 
 func parseDaysChoice(lbl string) int {
 	switch lbl {
+	case "近 1 天":
+		return 1
+	case "近 7 天":
+		return 7
+	case "近 14 天":
+		return 14
+	default:
+		return 3
+	}
+}
+
+// parseDigestDaysChoice returns 0 for "昨今两日" (so SendDailyCVEDigest filters strictly to [yesterday, today]),
+// or explicit day count otherwise.
+func parseDigestDaysChoice(lbl string) int {
+	switch lbl {
+	case "", "昨今两日":
+		return 0
 	case "近 1 天":
 		return 1
 	case "近 7 天":
@@ -398,7 +415,8 @@ func (s *AppState) PushDailyCVEDigestToTelegramAsync() {
 		return
 	}
 	s.CVEPushingTG = true
-	days := parseDaysChoice(s.CVEDaysChoice)
+	fetchDays := parseDaysChoice(s.CVEDaysChoice)
+	digestDays := parseDigestDaysChoice(s.CVEDaysChoice)
 	advSnap := make(map[string]model.Advisory, len(s.DailyAdvisories))
 	for k, v := range s.DailyAdvisories {
 		advSnap[k] = v
@@ -407,9 +425,9 @@ func (s *AppState) PushDailyCVEDigestToTelegramAsync() {
 		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 		defer cancel()
 		if len(advSnap) == 0 {
-			advSnap, _ = s.Runner.Intel.FetchAllAdvisories(ctx, days, true, true)
+			advSnap, _ = s.Runner.Intel.FetchAllAdvisories(ctx, fetchDays, true, true)
 		}
-		sent, err := notify.SendDailyCVEDigest(ctx, advSnap, days, true)
+		sent, err := notify.SendDailyCVEDigest(ctx, advSnap, digestDays, true)
 		s.uiSync(func() {
 			s.CVEPushingTG = false
 			if len(advSnap) > 0 && len(s.DailyAdvisories) == 0 {
@@ -420,8 +438,10 @@ func (s *AppState) PushDailyCVEDigestToTelegramAsync() {
 				s.StatusBanner = "推送每日 CVE 情报失败: " + err.Error()
 			case !sent:
 				s.StatusBanner = "未发送：请先在「钥匙串与智能策略」页配置并配对 Telegram 机器人"
+			case digestDays <= 0:
+				s.StatusBanner = "✈️ 已将昨今两日分类 CVE 情报日报单独推送至您的 Telegram！"
 			default:
-				s.StatusBanner = fmt.Sprintf("✈️ 已将近 %d 天分类 CVE 情报日报单独推送至您的 Telegram！", days)
+				s.StatusBanner = fmt.Sprintf("✈️ 已将近 %d 天分类 CVE 情报日报单独推送至您的 Telegram！", digestDays)
 			}
 		})
 	}()

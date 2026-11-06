@@ -22,11 +22,14 @@ description: >-
    ```
 2. **执行全集群安全只读巡检**：
    ```bash
-   # 默认 100% 安全只读，输出集群健康分 (0-100) 与各主机风险明细
-   sectl audit
+   # 过程排查 / 中间状态采集时建议加 --no-notify (或 --json)，避免同一次任务重复触发 Telegram 通知
+   sectl audit --no-notify
 
-   # 需要机器可读 JSON 明细时：
+   # 需要机器可读 JSON 明细时（自动静默不发通知）：
    sectl audit --json
+
+   # 最终闭环需要播报桌面横幅与 Telegram 日报时：
+   sectl audit
    ```
 3. **预览并应用官方系统安全补丁（含防级联卸载与 OpenWrt 闪存防变砖熔断）**：
    ```bash

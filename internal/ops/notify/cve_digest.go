@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sixban6/security-sentinel/internal/infra/config"
@@ -111,12 +112,91 @@ func FilterAdvisories(
 	return out
 }
 
+// parseAdvisoryLocalDate normalizes diverse upstream PublishedAt formats (RFC3339, NVD UTC, Debian YYYY-MM-DD, RHEL midnight UTC)
+// into a local calendar date string "YYYY-MM-DD" in loc.
+func parseAdvisoryLocalDate(adv model.Advisory, loc *time.Location) (string, bool) {
+	if loc == nil {
+		loc = time.Local
+	}
+	pub := strings.TrimSpace(adv.PublishedAt)
+	if pub == "" {
+		return "", false
+	}
+
+	// Date-granularity feeds (e.g. Debian DSA "2026-11-05", RHEL "2026-11-05T00:00:00Z") represent a calendar date directly.
+	if len(pub) == 10 || (strings.EqualFold(adv.Ecosystem, "RHEL") && len(pub) >= 10 && strings.HasSuffix(pub, "T00:00:00Z")) {
+		datePart := pub[:10]
+		if _, err := time.Parse("2006-01-02", datePart); err == nil {
+			return datePart, true
+		}
+	}
+
+	if t, err := time.Parse(time.RFC3339Nano, pub); err == nil {
+		return t.In(loc).Format("2006-01-02"), true
+	}
+
+	// NVD 2.0 timestamps omit trailing 'Z' (e.g. "2026-11-05T15:15:12.345") and are always in UTC.
+	for _, layout := range []string{
+		"2006-01-02T15:04:05.999999999",
+		"2006-01-02 15:04:05.999999999",
+	} {
+		if t, err := time.ParseInLocation(layout, pub, time.UTC); err == nil {
+			return t.In(loc).Format("2006-01-02"), true
+		}
+	}
+
+	for _, layout := range []string{time.RFC1123Z, time.RFC1123} {
+		if t, err := time.Parse(layout, pub); err == nil {
+			return t.In(loc).Format("2006-01-02"), true
+		}
+	}
+
+	if len(pub) >= 10 {
+		if _, err := time.Parse("2006-01-02", pub[:10]); err == nil {
+			return pub[:10], true
+		}
+	}
+	return "", false
+}
+
+// FilterAdvisoriesTodayAndYesterday strictly retains only advisories published on `now`'s local calendar date
+// or the immediately preceding local calendar date (昨天 + 当天).
+func FilterAdvisoriesTodayAndYesterday(advMap map[string]model.Advisory, now time.Time) map[string]model.Advisory {
+	out := make(map[string]model.Advisory)
+	if len(advMap) == 0 {
+		return out
+	}
+	loc := now.Location()
+	if loc == nil {
+		loc = time.Local
+	}
+	nowLocal := now.In(loc)
+	todayStart := time.Date(nowLocal.Year(), nowLocal.Month(), nowLocal.Day(), 0, 0, 0, 0, loc)
+	todayStr := todayStart.Format("2006-01-02")
+	yesterdayStr := todayStart.AddDate(0, 0, -1).Format("2006-01-02")
+
+	for k, adv := range advMap {
+		dStr, ok := parseAdvisoryLocalDate(adv, loc)
+		if !ok {
+			continue
+		}
+		if dStr == todayStr || dStr == yesterdayStr {
+			out[k] = adv
+		}
+	}
+	return out
+}
+
 // FormatDailyCVETelegramHTML formats a dedicated standalone Telegram message categorized by
 // Kernel, OS Distributions, Language Ecosystems, and Importance (Critical / High / Medium).
+// When days <= 0, the header displays the exact Today + Yesterday local calendar range.
 func FormatDailyCVETelegramHTML(advMap map[string]model.Advisory, days int, maxPerSection int) string {
-	if days <= 0 {
-		days = 3
-	}
+	return FormatDailyCVETelegramDigestHTML(advMap, time.Now(), days, maxPerSection)
+}
+
+// FormatDailyCVETelegramDigestHTML formats the categorized Telegram CVE digest relative to `now`.
+// When days <= 0, it labels the report with the exact local yesterday~today range (e.g. "11-05 ~ 11-06 · 昨今两日").
+func FormatDailyCVETelegramDigestHTML(advMap map[string]model.Advisory, now time.Time, days int, maxPerSection int) string {
 	if maxPerSection <= 0 {
 		maxPerSection = 8
 	}
@@ -144,9 +224,22 @@ func FormatDailyCVETelegramHTML(advMap map[string]model.Advisory, days int, maxP
 		}
 	}
 
-	nowStr := time.Now().Format("2006-01-02 15:04")
+	nowLocal := now.Local()
+	if now.Location() != nil {
+		nowLocal = now
+	}
+	nowStr := nowLocal.Format("2006-01-02 15:04")
+	windowTitle := ""
+	if days <= 0 {
+		todayStart := time.Date(nowLocal.Year(), nowLocal.Month(), nowLocal.Day(), 0, 0, 0, 0, nowLocal.Location())
+		yesterdayStart := todayStart.AddDate(0, 0, -1)
+		windowTitle = fmt.Sprintf("%s ~ %s · 昨今两日", yesterdayStart.Format("01-02"), todayStart.Format("01-02"))
+	} else {
+		windowTitle = fmt.Sprintf("近 %d 天", days)
+	}
+
 	var b strings.Builder
-	fmt.Fprintf(&b, "📡 <b>Security-Sentinel 每日最新 CVE 情报日报 (近 %d 天)</b>\n", days)
+	fmt.Fprintf(&b, "📡 <b>Security-Sentinel 每日最新 CVE 情报日报 (%s)</b>\n", windowTitle)
 	fmt.Fprintf(&b, "⏱️ <b>更新时间</b>: <code>%s</code>\n", nowStr)
 	fmt.Fprintf(&b, "📊 <b>情报总览</b>: 共 <code>%d</code> 条 (🔴 严重 <code>%d</code> · 🟠 高危 <code>%d</code> · 🟡 中危 <code>%d</code>)\n",
 		len(all), critCnt, highCnt, medCnt)
@@ -203,26 +296,82 @@ func FormatDailyCVETelegramHTML(advMap map[string]model.Advisory, days int, maxP
 
 type digestLedger struct {
 	Date      string `json:"date"`
+	SentAt    string `json:"sent_at,omitempty"`
+	Count     int    `json:"count,omitempty"`
 	Signature string `json:"signature"`
 }
+
+var (
+	digestMu   sync.Mutex
+	sendTGFunc = SendTelegram
+)
 
 func digestLedgerPath() string {
 	return filepath.Join(config.StateDir(), "last_cve_digest.json")
 }
 
+func acquireDigestLock(staleAfter time.Duration) func() {
+	lockPath := filepath.Join(config.StateDir(), "last_cve_digest.lock")
+	_ = os.MkdirAll(filepath.Dir(lockPath), 0o755)
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if err == nil {
+			_, _ = fmt.Fprintf(f, "%d\n", os.Getpid())
+			_ = f.Close()
+			return func() { _ = os.Remove(lockPath) }
+		}
+		if info, statErr := os.Stat(lockPath); statErr == nil && time.Since(info.ModTime()) > staleAfter {
+			_ = os.Remove(lockPath)
+			continue
+		}
+		if time.Now().After(deadline) {
+			return func() {}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
 // SendDailyCVEDigest pushes the standalone categorized Daily CVE Digest message to Telegram.
-// When force is false (automated audit runs), it deduplicates so identical digests are never spammed repeatedly on the same day.
+// When days <= 0 (default), advMap is strictly filtered to [yesterday, today] in local calendar time.
+// When force is false (automated audit runs), it enforces strict once-per-calendar-day idempotency
+// so multiple scans or newly published CVEs on the same day never trigger duplicate pushes.
 func SendDailyCVEDigest(ctx context.Context, advMap map[string]model.Advisory, days int, force bool) (bool, error) {
-	if len(advMap) == 0 {
+	return sendDailyCVEDigestAt(ctx, advMap, time.Now(), days, force)
+}
+
+func sendDailyCVEDigestAt(ctx context.Context, advMap map[string]model.Advisory, now time.Time, days int, force bool) (bool, error) {
+	digestMu.Lock()
+	defer digestMu.Unlock()
+
+	releaseLock := acquireDigestLock(2 * time.Minute)
+	defer releaseLock()
+
+	nowLocal := now.Local()
+	if now.Location() != nil {
+		nowLocal = now
+	}
+	today := nowLocal.Format("2006-01-02")
+
+	if !force {
+		if b, err := os.ReadFile(digestLedgerPath()); err == nil {
+			var prev digestLedger
+			if json.Unmarshal(b, &prev) == nil && prev.Date == today {
+				return false, nil
+			}
+		}
+	}
+
+	targetMap := advMap
+	if days <= 0 {
+		targetMap = FilterAdvisoriesTodayAndYesterday(advMap, nowLocal)
+	}
+
+	all := FilterAdvisories(targetMap, "all", "all", "all", "")
+	if len(all) == 0 && !force {
 		return false, nil
 	}
 
-	all := FilterAdvisories(advMap, "all", "all", "all", "")
-	if len(all) == 0 {
-		return false, nil
-	}
-
-	// Compute deterministic digest signature over top CVE IDs
 	var ids []string
 	for _, a := range all {
 		ids = append(ids, a.DisplayID())
@@ -230,24 +379,19 @@ func SendDailyCVEDigest(ctx context.Context, advMap map[string]model.Advisory, d
 	sort.Strings(ids)
 	sum := sha256.Sum256([]byte(strings.Join(ids, ",")))
 	sig := hex.EncodeToString(sum[:16])
-	today := time.Now().Format("2006-01-02")
 
-	if !force {
-		if b, err := os.ReadFile(digestLedgerPath()); err == nil {
-			var prev digestLedger
-			if json.Unmarshal(b, &prev) == nil && prev.Date == today && prev.Signature == sig {
-				return false, nil
-			}
-		}
-	}
-
-	msg := FormatDailyCVETelegramHTML(advMap, days, 8)
-	sent, err := SendTelegram(ctx, msg, "", "")
+	msg := FormatDailyCVETelegramDigestHTML(targetMap, nowLocal, days, 8)
+	sent, err := sendTGFunc(ctx, msg, "", "")
 	if err != nil || !sent {
 		return sent, err
 	}
 
-	if raw, err := json.Marshal(digestLedger{Date: today, Signature: sig}); err == nil {
+	if raw, err := json.Marshal(digestLedger{
+		Date:      today,
+		SentAt:    nowLocal.Format(time.RFC3339),
+		Count:     len(all),
+		Signature: sig,
+	}); err == nil {
 		_ = writeAtomic(digestLedgerPath(), raw)
 	}
 	return true, nil

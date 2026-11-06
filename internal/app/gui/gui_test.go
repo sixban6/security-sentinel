@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/egoist/mygo/ui"
 	"github.com/sixban6/security-sentinel/internal/infra/model"
@@ -87,14 +88,15 @@ func TestFlyoutAndMissionControlViewsRenderAndNavigateCleanly(t *testing.T) {
 
 	state.DailyAdvisories = map[string]model.Advisory{
 		"CVE-2026-9901": {
-			ID:        "CVE-2026-9901",
-			CVEID:     "CVE-2026-9901",
-			Category:  "kernel",
-			Ecosystem: model.EcoLinux,
-			Severity:  "CRITICAL",
-			CVSS:      9.8,
-			Package:   "linux",
-			Summary:   "RCU UAF in coredump",
+			ID:          "CVE-2026-9901",
+			CVEID:       "CVE-2026-9901",
+			Category:    "kernel",
+			Ecosystem:   model.EcoLinux,
+			Severity:    "CRITICAL",
+			CVSS:        9.8,
+			Package:     "linux",
+			Summary:     "RCU UAF in coredump",
+			PublishedAt: time.Now().UTC().Format(time.RFC3339),
 		},
 	}
 

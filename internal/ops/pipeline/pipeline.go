@@ -245,7 +245,13 @@ func (r *Runner) RunAudit(ctx context.Context, p AuditParams) (model.AuditReport
 	} else {
 		_, _ = notify.SaveAndNotify(ctx, rep, p.StatusFile, p.Config.Notifications)
 		if p.Config.Notifications.Policy != "critical_only" {
-			_, _ = notify.SendDailyCVEDigest(ctx, advs, days, false)
+			digestAdvs := advs
+			if days < 2 {
+				if wider, err := r.Intel.FetchAllAdvisories(ctx, 2, p.Config.Advisories.IncludeKernel, p.UseAdvCache); err == nil && len(wider) > 0 {
+					digestAdvs = wider
+				}
+			}
+			_, _ = notify.SendDailyCVEDigest(ctx, digestAdvs, 0, false)
 		}
 	}
 	return rep, nil
