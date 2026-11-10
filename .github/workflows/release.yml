@@ -86,14 +86,34 @@ jobs:
     needs: [build-cli, build-macos-app]
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout with full git history for changelog
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: release-staging
           merge-multiple: true
 
-      - name: Generate unified checksums.txt
+      - name: Generate unified checksums.txt & detailed Release Notes
         run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          PREV_TAG=$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || true)
+          {
+            echo "### ✨ ${TAG} 更新内容"
+            echo ""
+            if [[ -n "${PREV_TAG}" ]]; then
+              git log --no-merges --pretty=format:"- **%s** (\`%h\`)" "${PREV_TAG}..${TAG}"
+              echo ""
+              echo ""
+              git log --no-merges --pretty=format:"%b" "${PREV_TAG}..${TAG}" | sed '/^[[:space:]]*$/d'
+            else
+              git log -n 5 --no-merges --pretty=format:"- **%s** (\`%h\`)"
+            fi
+          } > release-notes.md
+          cat release-notes.md
           cd release-staging
           sha256sum * > checksums.txt
           cat checksums.txt
@@ -103,4 +123,5 @@ jobs:
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           files: release-staging/*
+          body_path: release-notes.md
           generate_release_notes: true

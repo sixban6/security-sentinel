@@ -43,42 +43,59 @@ func NewEngine(cfg config.AIRemediationConfig, mem *store.Store) *Engine {
 	}
 }
 
-// ResolveProvider selects the best available AI backend ("gemini", "openai", "anthropic", "agy", or "").
+// ResolveProvider selects the best available AI backend ("openai", "anthropic", "gemini", "agy", or "").
 func (e *Engine) ResolveProvider() (provider string, detail string) {
 	pref := strings.ToLower(strings.TrimSpace(e.Cfg.Provider))
 	if pref == "" {
-		pref = "gemini"
+		if strings.TrimSpace(e.Cfg.BaseURL) != "" {
+			pref = "openai"
+		} else {
+			pref = "openai"
+		}
 	}
+	gwDesc := strings.TrimSpace(e.Cfg.BaseURL)
 	switch pref {
+	case "openai":
+		if secrets.GetAIGatewayToken("openai") != "" {
+			if gwDesc != "" {
+				return "openai", "OpenAI 兼容网关 (" + gwDesc + ")"
+			}
+			return "openai", "OpenAI Compatible HTTPS API"
+		}
+		return "", "未配置 AI 网关访问令牌 (Token / API Key)"
+	case "anthropic":
+		if secrets.GetAIGatewayToken("anthropic") != "" {
+			if gwDesc != "" {
+				return "anthropic", "Anthropic 兼容网关 (" + gwDesc + ")"
+			}
+			return "anthropic", "Anthropic Claude HTTPS API"
+		}
+		return "", "未配置 AI 网关访问令牌 (Token / API Key)"
 	case "gemini":
-		if secrets.Get(secrets.KeyGeminiAPIKey) != "" {
+		if secrets.GetAIGatewayToken("gemini") != "" {
+			if gwDesc != "" {
+				return "gemini", "Gemini 兼容网关 (" + gwDesc + ")"
+			}
 			return "gemini", "Google Gemini HTTPS API"
 		}
 		if bin := FindAgyBinary(); bin != "" {
 			return "agy", "Google Gemini via local agy (" + bin + ")"
 		}
-		return "", "已选择 Gemini 后端，请在钥匙串填入 GEMINI_API_KEY 或安装登录本地 agy"
-	case "openai":
-		if secrets.Get(secrets.KeyOpenAIAPIKey) != "" {
-			return "openai", "OpenAI Compatible HTTPS API"
-		}
-		return "", "已指定 provider=openai 但未配置 OPENAI_API_KEY"
-	case "anthropic":
-		if secrets.Get(secrets.KeyAnthropicAPIKey) != "" {
-			return "anthropic", "Anthropic Claude HTTPS API"
-		}
-		return "", "已指定 provider=anthropic 但未配置 ANTHROPIC_API_KEY"
+		return "", "未配置 AI 网关访问令牌 (Token / API Key) 或本地 agy"
 	case "agy":
 		if bin := FindAgyBinary(); bin != "" {
 			return "agy", "Local Google agy CLI (" + bin + ")"
 		}
 		return "", "已指定 provider=agy 但本机未找到 agy 命令"
 	default: // "auto"
+		if secrets.Get(secrets.KeyAIGatewayToken) != "" || secrets.Get(secrets.KeyOpenAIAPIKey) != "" {
+			if gwDesc != "" {
+				return "openai", "OpenAI 兼容网关 (" + gwDesc + ")"
+			}
+			return "openai", "OpenAI Compatible HTTPS API"
+		}
 		if secrets.Get(secrets.KeyGeminiAPIKey) != "" {
 			return "gemini", "Google Gemini HTTPS API"
-		}
-		if secrets.Get(secrets.KeyOpenAIAPIKey) != "" {
-			return "openai", "OpenAI Compatible HTTPS API"
 		}
 		if secrets.Get(secrets.KeyAnthropicAPIKey) != "" {
 			return "anthropic", "Anthropic Claude HTTPS API"
@@ -86,8 +103,31 @@ func (e *Engine) ResolveProvider() (provider string, detail string) {
 		if bin := FindAgyBinary(); bin != "" {
 			return "agy", "Local Google agy CLI (" + bin + ")"
 		}
-		return "", "未检测到 AI 密钥 (GEMINI_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY) 或本地 agy 工具"
+		return "", "未检测到 AI 网关 Token 或本地 agy 工具"
 	}
+}
+
+// TestConnectivity sends a minimal ping request to verify BaseURL + Token + Model connectivity and latency.
+func (e *Engine) TestConnectivity(ctx context.Context) (latencyMS int64, modelUsed string, err error) {
+	provider, reason := e.ResolveProvider()
+	if provider == "" {
+		return 0, "", fmt.Errorf("%s", reason)
+	}
+	modelName := strings.TrimSpace(e.Cfg.Model)
+	if modelName == "" {
+		switch provider {
+		case "anthropic":
+			modelName = "claude-3-7-sonnet-latest"
+		case "gemini", "agy":
+			modelName = "gemini-2.5-flash"
+		default:
+			modelName = "gpt-4o-mini"
+		}
+	}
+	start := time.Now()
+	_, err = e.callModel(ctx, provider, modelName, "Reply with the single word OK.")
+	latencyMS = time.Since(start).Milliseconds()
+	return latencyMS, modelName, err
 }
 
 // FindAgyBinary locates Google agy CLI if installed.
@@ -406,17 +446,19 @@ func (e *Engine) callModel(ctx context.Context, provider, modelName, prompt stri
 }
 
 func (e *Engine) callGeminiREST(ctx context.Context, modelName, prompt string) (string, error) {
-	apiKey := secrets.Get(secrets.KeyGeminiAPIKey)
+	apiKey := secrets.GetAIGatewayToken("gemini")
 	if apiKey == "" {
-		return "", fmt.Errorf("missing GEMINI_API_KEY")
+		return "", fmt.Errorf("未配置 AI 网关 Token")
 	}
-	if strings.Contains(modelName, "3.8") {
-		// Map internal agy alias to public Gemini API model when calling REST directly
+	modelName = strings.TrimSpace(modelName)
+	if modelName == "" || strings.Contains(modelName, "3.8") {
 		modelName = "gemini-2.5-flash"
 	}
-	baseURL := strings.TrimRight(e.Cfg.BaseURL, "/")
+	baseURL := strings.TrimRight(strings.TrimSpace(e.Cfg.BaseURL), "/")
 	if baseURL == "" {
 		baseURL = "https://generativelanguage.googleapis.com/v1beta"
+	} else if !strings.Contains(baseURL, "/v1") {
+		baseURL += "/v1beta"
 	}
 	u := fmt.Sprintf("%s/models/%s:generateContent?key=%s", baseURL, modelName, apiKey)
 	body, _ := json.Marshal(map[string]any{
@@ -430,6 +472,7 @@ func (e *Engine) callGeminiREST(ctx context.Context, modelName, prompt string) (
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-goog-api-key", apiKey)
 	resp, err := e.HTTP.Do(req)
 	if err != nil {
 		return "", err
@@ -437,7 +480,7 @@ func (e *Engine) callGeminiREST(ctx context.Context, modelName, prompt string) (
 	defer resp.Body.Close()
 	respBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("Gemini API HTTP %d: %s", resp.StatusCode, truncateStr(string(respBytes), 120))
+		return "", fmt.Errorf("Gemini 网关 HTTP %d: %s", resp.StatusCode, truncateStr(string(respBytes), 120))
 	}
 	var parsed struct {
 		Candidates []struct {
@@ -449,23 +492,35 @@ func (e *Engine) callGeminiREST(ctx context.Context, modelName, prompt string) (
 		} `json:"candidates"`
 	}
 	if err := json.Unmarshal(respBytes, &parsed); err != nil || len(parsed.Candidates) == 0 || len(parsed.Candidates[0].Content.Parts) == 0 {
-		return "", fmt.Errorf("Gemini API 返回结果为空")
+		return "", fmt.Errorf("Gemini 网关返回结果为空")
 	}
 	return parsed.Candidates[0].Content.Parts[0].Text, nil
 }
 
+func resolveOpenAIEndpoint(baseURL string) string {
+	b := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if b == "" {
+		return "https://api.openai.com/v1/chat/completions"
+	}
+	if strings.HasSuffix(b, "/chat/completions") {
+		return b
+	}
+	if strings.HasSuffix(b, "/v1") || strings.Contains(b, "/v1/") || strings.HasSuffix(b, "/v4") {
+		return b + "/chat/completions"
+	}
+	return b + "/v1/chat/completions"
+}
+
 func (e *Engine) callOpenAIREST(ctx context.Context, modelName, prompt string) (string, error) {
-	apiKey := secrets.Get(secrets.KeyOpenAIAPIKey)
+	apiKey := secrets.GetAIGatewayToken("openai")
 	if apiKey == "" {
-		return "", fmt.Errorf("missing OPENAI_API_KEY")
+		return "", fmt.Errorf("未配置 AI 网关 Token")
 	}
-	baseURL := strings.TrimRight(e.Cfg.BaseURL, "/")
-	if baseURL == "" {
-		baseURL = "https://api.openai.com/v1"
-	}
-	if strings.HasPrefix(modelName, "gemini-") && e.Cfg.BaseURL == "" {
+	modelName = strings.TrimSpace(modelName)
+	if modelName == "" {
 		modelName = "gpt-4o-mini"
 	}
+	endpoint := resolveOpenAIEndpoint(e.Cfg.BaseURL)
 	body, _ := json.Marshal(map[string]any{
 		"model":       modelName,
 		"temperature": 0.1,
@@ -473,7 +528,7 @@ func (e *Engine) callOpenAIREST(ctx context.Context, modelName, prompt string) (
 			{"role": "user", "content": prompt},
 		},
 	})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/chat/completions", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return "", err
 	}
@@ -486,7 +541,7 @@ func (e *Engine) callOpenAIREST(ctx context.Context, modelName, prompt string) (
 	defer resp.Body.Close()
 	respBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("OpenAI API HTTP %d: %s", resp.StatusCode, truncateStr(string(respBytes), 120))
+		return "", fmt.Errorf("AI 网关 HTTP %d: %s", resp.StatusCode, truncateStr(string(respBytes), 120))
 	}
 	var parsed struct {
 		Choices []struct {
@@ -496,23 +551,35 @@ func (e *Engine) callOpenAIREST(ctx context.Context, modelName, prompt string) (
 		} `json:"choices"`
 	}
 	if err := json.Unmarshal(respBytes, &parsed); err != nil || len(parsed.Choices) == 0 {
-		return "", fmt.Errorf("OpenAI API 返回结果为空")
+		return "", fmt.Errorf("AI 网关返回结果为空")
 	}
 	return parsed.Choices[0].Message.Content, nil
 }
 
+func resolveAnthropicEndpoint(baseURL string) string {
+	b := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if b == "" {
+		return "https://api.anthropic.com/v1/messages"
+	}
+	if strings.HasSuffix(b, "/messages") {
+		return b
+	}
+	if strings.HasSuffix(b, "/v1") {
+		return b + "/messages"
+	}
+	return b + "/v1/messages"
+}
+
 func (e *Engine) callAnthropicREST(ctx context.Context, modelName, prompt string) (string, error) {
-	apiKey := secrets.Get(secrets.KeyAnthropicAPIKey)
+	apiKey := secrets.GetAIGatewayToken("anthropic")
 	if apiKey == "" {
-		return "", fmt.Errorf("missing ANTHROPIC_API_KEY")
+		return "", fmt.Errorf("未配置 AI 网关 Token")
 	}
-	baseURL := strings.TrimRight(e.Cfg.BaseURL, "/")
-	if baseURL == "" {
-		baseURL = "https://api.anthropic.com/v1"
-	}
-	if strings.HasPrefix(modelName, "gemini-") {
+	modelName = strings.TrimSpace(modelName)
+	if modelName == "" {
 		modelName = "claude-3-7-sonnet-latest"
 	}
+	endpoint := resolveAnthropicEndpoint(e.Cfg.BaseURL)
 	body, _ := json.Marshal(map[string]any{
 		"model":      modelName,
 		"max_tokens": 2048,
@@ -520,12 +587,13 @@ func (e *Engine) callAnthropicREST(ctx context.Context, modelName, prompt string
 			{"role": "user", "content": prompt},
 		},
 	})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/messages", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("x-api-key", apiKey)
+	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("anthropic-version", "2023-06-01")
 	resp, err := e.HTTP.Do(req)
 	if err != nil {
@@ -534,7 +602,7 @@ func (e *Engine) callAnthropicREST(ctx context.Context, modelName, prompt string
 	defer resp.Body.Close()
 	respBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("Anthropic API HTTP %d: %s", resp.StatusCode, truncateStr(string(respBytes), 120))
+		return "", fmt.Errorf("Anthropic 网关 HTTP %d: %s", resp.StatusCode, truncateStr(string(respBytes), 120))
 	}
 	var parsed struct {
 		Content []struct {
@@ -542,7 +610,7 @@ func (e *Engine) callAnthropicREST(ctx context.Context, modelName, prompt string
 		} `json:"content"`
 	}
 	if err := json.Unmarshal(respBytes, &parsed); err != nil || len(parsed.Content) == 0 {
-		return "", fmt.Errorf("Anthropic API 返回结果为空")
+		return "", fmt.Errorf("Anthropic 网关返回结果为空")
 	}
 	return parsed.Content[0].Text, nil
 }

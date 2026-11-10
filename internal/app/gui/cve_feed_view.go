@@ -41,48 +41,66 @@ func (s *AppState) renderDailyCVEFeedPage(c *ui.Context) {
 		sevCode = "MEDIUM"
 	}
 
-	// Compute overall breakdown counts + dynamic sub-ecosystem options for current category
-	sourceAdvs := s.DailyAdvisories
-	if s.CVEDaysChoice == "" || s.CVEDaysChoice == "昨今两日" {
-		sourceAdvs = notify.FilterAdvisoriesTodayAndYesterday(s.DailyAdvisories, time.Now())
-	}
-	allDedup := notify.FilterAdvisories(sourceAdvs, "all", "all", "all", "")
-	langTotal, osTotal, krnTotal := 0, 0, 0
-	ecoSet := make(map[string]bool)
-	for _, a := range allDedup {
-		cType := a.EffectiveCategory()
-		switch cType {
-		case "kernel":
-			krnTotal++
-		case "os":
-			osTotal++
-		default:
-			langTotal++
+	// Memoize breakdown counts, ecosystem options, and filtered sorted list across frames!
+	sig := fmt.Sprintf("%d|%d|%s|%s|%s|%s|%s",
+		s.cveCacheGen, len(s.DailyAdvisories), s.CVEDaysChoice, catCode, sevCode, s.CVEEcosystemChoice, s.CVESearchQuery)
+	if s.cveCacheSig != sig {
+		sourceAdvs := s.DailyAdvisories
+		if s.CVEDaysChoice == "" || s.CVEDaysChoice == "昨今两日" {
+			sourceAdvs = notify.FilterAdvisoriesTodayAndYesterday(s.DailyAdvisories, time.Now())
 		}
-		if (catCode == "all" || catCode == cType) && a.Ecosystem != "" {
-			ecoSet[a.Ecosystem] = true
+		allDedup := notify.FilterAdvisories(sourceAdvs, "all", "all", "all", "")
+		langTotal, osTotal, krnTotal := 0, 0, 0
+		ecoSet := make(map[string]bool)
+		for _, a := range allDedup {
+			cType := a.EffectiveCategory()
+			switch cType {
+			case "kernel":
+				krnTotal++
+			case "os":
+				osTotal++
+			default:
+				langTotal++
+			}
+			if (catCode == "all" || catCode == cType) && a.Ecosystem != "" {
+				ecoSet[a.Ecosystem] = true
+			}
 		}
+
+		ecoOptions := []string{"全部生态"}
+		var sortedEcos []string
+		for k := range ecoSet {
+			sortedEcos = append(sortedEcos, k)
+		}
+		sort.Strings(sortedEcos)
+		ecoOptions = append(ecoOptions, sortedEcos...)
+		validChoice := false
+		for _, opt := range ecoOptions {
+			if opt == s.CVEEcosystemChoice {
+				validChoice = true
+				break
+			}
+		}
+		if !validChoice {
+			s.CVEEcosystemChoice = "全部生态"
+		}
+
+		s.cveCachedAllCount = len(allDedup)
+		s.cveCachedLangCount = langTotal
+		s.cveCachedOSCount = osTotal
+		s.cveCachedKernelCount = krnTotal
+		s.cveCachedEcoOptions = ecoOptions
+		s.cveCachedFiltered = notify.FilterAdvisories(sourceAdvs, catCode, sevCode, s.CVEEcosystemChoice, s.CVESearchQuery)
+		s.cveCacheSig = fmt.Sprintf("%d|%d|%s|%s|%s|%s|%s",
+			s.cveCacheGen, len(s.DailyAdvisories), s.CVEDaysChoice, catCode, sevCode, s.CVEEcosystemChoice, s.CVESearchQuery)
 	}
 
-	ecoOptions := []string{"全部生态"}
-	var sortedEcos []string
-	for k := range ecoSet {
-		sortedEcos = append(sortedEcos, k)
-	}
-	sort.Strings(sortedEcos)
-	ecoOptions = append(ecoOptions, sortedEcos...)
-	validChoice := false
-	for _, opt := range ecoOptions {
-		if opt == s.CVEEcosystemChoice {
-			validChoice = true
-			break
-		}
-	}
-	if !validChoice {
-		s.CVEEcosystemChoice = "全部生态"
-	}
-
-	filtered := notify.FilterAdvisories(sourceAdvs, catCode, sevCode, s.CVEEcosystemChoice, s.CVESearchQuery)
+	allTotal := s.cveCachedAllCount
+	langTotal := s.cveCachedLangCount
+	osTotal := s.cveCachedOSCount
+	krnTotal := s.cveCachedKernelCount
+	ecoOptions := s.cveCachedEcoOptions
+	filtered := s.cveCachedFiltered
 
 	ui.Column(c).Fill().Padding(22).Gap(12).Children(func() {
 		// 1. Header Row: Title + Counts + Time Window + Refresh + Standalone Telegram Push
@@ -90,7 +108,7 @@ func (s *AppState) renderDailyCVEFeedPage(c *ui.Context) {
 			ui.Column(c).Grow(1).Gap(2).Children(func() {
 				ui.Text(c, "📡 每日最新 CVE 全球安全情报中心").FontSize(18).Bold()
 				ui.Text(c, fmt.Sprintf("全网总计 %d 条 · 💻 语言环境 %d · 🖥️ 操作系统 %d · 🐧 Linux 内核 %d (当前筛选命中 %d 条)",
-					len(allDedup), langTotal, osTotal, krnTotal, len(filtered))).
+					allTotal, langTotal, osTotal, krnTotal, len(filtered))).
 					FontSize(12).TextColor(t.TextMuted)
 			})
 

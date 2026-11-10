@@ -20,6 +20,7 @@ const (
 	KeyTelegramBotToken = "telegram_bot_token"
 	KeyTelegramChatID   = "telegram_chat_id"
 	KeyGitHubToken      = "github_token"
+	KeyAIGatewayToken   = "ai_gateway_token"
 	KeyGeminiAPIKey     = "gemini_api_key"
 	KeyOpenAIAPIKey     = "openai_api_key"
 	KeyAnthropicAPIKey  = "anthropic_api_key"
@@ -30,6 +31,7 @@ var envVarMap = map[string]string{
 	KeyTelegramBotToken: "TELEGRAM_BOT_TOKEN",
 	KeyTelegramChatID:   "TELEGRAM_CHAT_ID",
 	KeyGitHubToken:      "GITHUB_TOKEN",
+	KeyAIGatewayToken:   "AI_GATEWAY_TOKEN",
 	KeyGeminiAPIKey:     "GEMINI_API_KEY",
 	KeyOpenAIAPIKey:     "OPENAI_API_KEY",
 	KeyAnthropicAPIKey:  "ANTHROPIC_API_KEY",
@@ -46,6 +48,7 @@ type NativeBackend interface {
 var (
 	mu            sync.RWMutex
 	nativeBackend NativeBackend
+	memCache      = make(map[string]string)
 )
 
 // RegisterNativeBackend wires mygo.Secrets when running inside the desktop app.
@@ -53,17 +56,51 @@ func RegisterNativeBackend(b NativeBackend) {
 	mu.Lock()
 	defer mu.Unlock()
 	nativeBackend = b
+	memCache = make(map[string]string)
+}
+
+func cacheSlotKey(key string) string {
+	return credentialsFilePath() + "|" + os.Getenv("SENTINEL_DISABLE_KEYCHAIN") + "|" + key
 }
 
 func credentialsFilePath() string {
 	return filepath.Join(config.ConfigDir(), "credentials.json")
 }
 
+// GetAIGatewayToken returns the unified AI Gateway token if configured, falling back to
+// provider-specific legacy keys (OPENAI_API_KEY / GEMINI_API_KEY / ANTHROPIC_API_KEY) for backwards compatibility.
+func GetAIGatewayToken(provider string) string {
+	if tok := Get(KeyAIGatewayToken); tok != "" {
+		return tok
+	}
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "gemini":
+		if tok := Get(KeyGeminiAPIKey); tok != "" {
+			return tok
+		}
+	case "anthropic":
+		if tok := Get(KeyAnthropicAPIKey); tok != "" {
+			return tok
+		}
+	case "openai":
+		if tok := Get(KeyOpenAIAPIKey); tok != "" {
+			return tok
+		}
+	}
+	for _, k := range []string{KeyOpenAIAPIKey, KeyGeminiAPIKey, KeyAnthropicAPIKey} {
+		if tok := Get(k); tok != "" {
+			return tok
+		}
+	}
+	return ""
+}
+
 // Get retrieves a credential with priority:
 // 1. Explicit environment variable
-// 2. Registered MyGo OS Keychain backend (or macOS /usr/bin/security Keychain lookup)
-// 3. 0600 local credentials.json fallback
-// 4. Legacy ~/.gemini/config/sentinel_telegram.json read-only migration fallback
+// 2. In-memory cache (avoids 60-120fps OS Keychain IPC / subprocess / disk I/O stalls in GUI render loops)
+// 3. Registered MyGo OS Keychain backend (or macOS /usr/bin/security Keychain lookup)
+// 4. 0600 local credentials.json fallback
+// 5. Legacy ~/.gemini/config/sentinel_telegram.json read-only migration fallback
 func Get(key string) string {
 	if envName, ok := envVarMap[key]; ok {
 		if v := strings.TrimSpace(os.Getenv(envName)); v != "" {
@@ -71,9 +108,27 @@ func Get(key string) string {
 		}
 	}
 
+	slot := cacheSlotKey(key)
 	mu.RLock()
+	cachedVal, hit := memCache[slot]
 	nb := nativeBackend
 	mu.RUnlock()
+	if hit {
+		return cachedVal
+	}
+
+	val := resolveUncached(key, nb)
+
+	mu.Lock()
+	if memCache == nil {
+		memCache = make(map[string]string)
+	}
+	memCache[slot] = val
+	mu.Unlock()
+	return val
+}
+
+func resolveUncached(key string, nb NativeBackend) string {
 	if nb != nil {
 		if v, err := nb.Get(key); err == nil && strings.TrimSpace(v) != "" {
 			return strings.TrimSpace(v)
@@ -103,7 +158,7 @@ func Get(key string) string {
 		}
 	}
 
-	// For GitHub token, optionally query `gh auth token` if installed
+	// For GitHub token, optionally query `gh auth token` once if installed
 	if key == KeyGitHubToken && os.Getenv("SENTINEL_SKIP_GH_CLI") == "" {
 		if out, err := exec.Command("gh", "auth", "token").Output(); err == nil {
 			if tok := strings.TrimSpace(string(out)); tok != "" {
@@ -122,9 +177,14 @@ func Set(key, value string) error {
 		return Delete(key)
 	}
 
-	mu.RLock()
+	slot := cacheSlotKey(key)
+	mu.Lock()
+	if memCache == nil {
+		memCache = make(map[string]string)
+	}
+	memCache[slot] = value
 	nb := nativeBackend
-	mu.RUnlock()
+	mu.Unlock()
 	if nb != nil {
 		if err := nb.Set(key, value); err == nil {
 			// Also remove any stale plaintext entry in fallback file
@@ -143,9 +203,13 @@ func Set(key, value string) error {
 
 // Delete removes a credential from Keychain and local fallback storage.
 func Delete(key string) error {
-	mu.RLock()
+	slot := cacheSlotKey(key)
+	mu.Lock()
+	if memCache != nil {
+		memCache[slot] = ""
+	}
 	nb := nativeBackend
-	mu.RUnlock()
+	mu.Unlock()
 	if nb != nil {
 		_ = nb.Delete(key)
 	} else if runtime.GOOS == "darwin" && os.Getenv("SENTINEL_DISABLE_KEYCHAIN") == "" {

@@ -15,7 +15,7 @@ import (
 func (s *AppState) renderTriageDiffPage(c *ui.Context) {
 	t := c.Theme()
 	entries := s.FilteredVulnEntries()
-	ignoreRules := s.Mem.ListIgnoreRules()
+	ignoreRules := s.IgnoreRules
 
 	var selected *SelectedVulnEntry
 	for i := range entries {

@@ -117,7 +117,127 @@ func (c *Client) CheckLatest(ctx context.Context, currentVersion string) (Releas
 	if rel.Version != "" && version.CompareSemVerLike(curClean, rel.Version) < 0 {
 		rel.HasUpdate = true
 	}
+	if isChangelogBodySparse(rel.Body) {
+		if enriched := c.fetchCommitChangelog(ctx, rel.TagName, rel.Body); enriched != "" {
+			rel.Body = enriched
+		}
+	}
 	return rel, nil
+}
+
+// isChangelogBodySparse returns true when GitHub's auto-generated release body is empty or only contains
+// a single "**Full Changelog**: https://.../compare/..." link without actual commit bullet points.
+func isChangelogBodySparse(body string) bool {
+	trimmed := strings.TrimSpace(body)
+	if trimmed == "" {
+		return true
+	}
+	lines := strings.Split(trimmed, "\n")
+	meaningful := 0
+	for _, l := range lines {
+		l = strings.TrimSpace(l)
+		if l == "" || strings.HasPrefix(l, "**Full Changelog**") || strings.HasPrefix(l, "Full Changelog") {
+			continue
+		}
+		meaningful++
+	}
+	return meaningful == 0
+}
+
+func (c *Client) fetchCommitChangelog(ctx context.Context, tagName, existingBody string) string {
+	baseAPI := strings.TrimRight(c.APIBaseURL, "/")
+	var compareSpec string
+	if idx := strings.Index(existingBody, "/compare/"); idx >= 0 {
+		sub := existingBody[idx+len("/compare/"):]
+		if fields := strings.Fields(sub); len(fields) > 0 {
+			compareSpec = strings.TrimSpace(fields[0])
+		}
+	}
+
+	type ghCommitEntry struct {
+		SHA    string `json:"sha"`
+		Commit struct {
+			Message string `json:"message"`
+		} `json:"commit"`
+	}
+
+	var commits []ghCommitEntry
+	if compareSpec != "" {
+		u := fmt.Sprintf("%s/repos/%s/compare/%s", baseAPI, c.Repo, compareSpec)
+		if data, err := c.getJSONBytes(ctx, u); err == nil {
+			var parsed struct {
+				Commits []ghCommitEntry `json:"commits"`
+			}
+			if json.Unmarshal(data, &parsed) == nil && len(parsed.Commits) > 0 {
+				commits = parsed.Commits
+			}
+		}
+	}
+	if len(commits) == 0 && tagName != "" {
+		u := fmt.Sprintf("%s/repos/%s/commits?sha=%s&per_page=5", baseAPI, c.Repo, tagName)
+		if data, err := c.getJSONBytes(ctx, u); err == nil {
+			_ = json.Unmarshal(data, &commits)
+		}
+	}
+	if len(commits) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	// Show newest commits first
+	for i := len(commits) - 1; i >= 0; i-- {
+		msg := strings.TrimSpace(commits[i].Commit.Message)
+		if msg == "" {
+			continue
+		}
+		lines := strings.Split(msg, "\n")
+		title := strings.TrimSpace(lines[0])
+		shortSHA := commits[i].SHA
+		if len(shortSHA) > 7 {
+			shortSHA = shortSHA[:7]
+		}
+		if shortSHA != "" {
+			b.WriteString(fmt.Sprintf("- **%s** (`%s`)\n", title, shortSHA))
+		} else {
+			b.WriteString(fmt.Sprintf("- **%s**\n", title))
+		}
+		for _, sub := range lines[1:] {
+			sub = strings.TrimSpace(sub)
+			if sub == "" {
+				continue
+			}
+			if strings.HasPrefix(sub, "-") || strings.HasPrefix(sub, "*") {
+				b.WriteString("  " + sub + "\n")
+			} else {
+				b.WriteString("  - " + sub + "\n")
+			}
+		}
+	}
+	if strings.TrimSpace(existingBody) != "" {
+		b.WriteString("\n" + strings.TrimSpace(existingBody))
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func (c *Client) getJSONBytes(ctx context.Context, u string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "Security-Sentinel/"+model.Version)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	if tok := secrets.Get(secrets.KeyGitHubToken); tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 }
 
 // UpgradeCLI downloads, SHA-256 verifies, and atomically replaces targetBinPath (or the running CLI binary),
@@ -221,6 +341,7 @@ func (c *Client) UpgradeMacOSApp(ctx context.Context, rel ReleaseInfo, destAppBu
 		return "", fmt.Errorf("升级压缩包内未找到 Security Sentinel.app")
 	}
 	_ = exec.Command("xattr", "-cr", extractedApp).Run()
+	_ = exec.Command("codesign", "--force", "--deep", "--sign", "-", extractedApp).Run()
 
 	backupApp := destAppBundle + ".old"
 	_ = os.RemoveAll(backupApp)

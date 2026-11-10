@@ -221,19 +221,32 @@ func (s *AppState) refreshTrayAppearance() {
 	}
 	posture := s.ClusterPosture()
 	useTemplate := runtime.GOOS == "darwin" && posture == "clean" && !s.Scanning
-	_ = s.Tray.SetIcon(RenderShieldPNG(64, posture, useTemplate), useTemplate)
+	iconSig := fmt.Sprintf("%s|%v", posture, useTemplate)
+	if s.lastTrayIconSig != iconSig {
+		_ = s.Tray.SetIcon(RenderShieldPNG(64, posture, useTemplate), useTemplate)
+		s.lastTrayIconSig = iconSig
+	}
 
 	unmit, _, _ := s.PendingCounts()
+	var title, tooltip string
 	switch {
 	case s.Scanning:
-		s.Tray.SetTitle(" …")
-		s.Tray.SetToolTip("Security Sentinel — 正在巡检集群安全状态…")
+		title = " …"
+		tooltip = "Security Sentinel — 正在巡检集群安全状态…"
 	case unmit > 0:
-		s.Tray.SetTitle(fmt.Sprintf(" %d", unmit))
-		s.Tray.SetToolTip(fmt.Sprintf("Security Sentinel — %d 项待处置风险 (健康分 %d/100)", unmit, s.Report.ClusterScore))
+		title = fmt.Sprintf(" %d", unmit)
+		tooltip = fmt.Sprintf("Security Sentinel — %d 项待处置风险 (健康分 %d/100)", unmit, s.Report.ClusterScore)
 	default:
-		s.Tray.SetTitle("")
-		s.Tray.SetToolTip(fmt.Sprintf("Security Sentinel — 全集群安全 (%d/100)", s.Report.ClusterScore))
+		title = ""
+		tooltip = fmt.Sprintf("Security Sentinel — 全集群安全 (%d/100)", s.Report.ClusterScore)
+	}
+	if s.lastTrayTitle != title {
+		s.Tray.SetTitle(title)
+		s.lastTrayTitle = title
+	}
+	if s.lastTrayTooltip != tooltip {
+		s.Tray.SetToolTip(tooltip)
+		s.lastTrayTooltip = tooltip
 	}
 }
 

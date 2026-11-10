@@ -42,61 +42,82 @@ func classifyAssetLayerLabel(a model.AssetItem) (layerCode string, badge string)
 
 // OpenAssetExplorerModal loads the full 5-layer discovered asset snapshot and opens the Panorama Asset Explorer.
 func (s *AppState) OpenAssetExplorerModal(initialLayerTab int) {
-	s.DiscoveredAssetsMap = inventory.LoadDiscoveredInventories()
 	s.AssetExplorerLayerTab = initialLayerTab
 	s.ShowAssetExplorer = true
+	if s.Headless {
+		s.DiscoveredAssetsMap = inventory.LoadDiscoveredInventories()
+		s.assetCacheGen++
+		return
+	}
+	go func() {
+		invs := inventory.LoadDiscoveredInventories()
+		s.uiSync(func() {
+			s.DiscoveredAssetsMap = invs
+			s.assetCacheGen++
+		})
+	}()
 }
 
 // renderAssetExplorerModal renders the searchable, 120fps virtualized 5-Layer Panorama Asset Explorer dialog.
 func (s *AppState) renderAssetExplorerModal(c *ui.Context) {
 	t := c.Theme()
 	ui.Modal(c, &s.ShowAssetExplorer, func() {
-		hostOptions := []string{"全部主机"}
-		var hostNames []string
-		for k := range s.DiscoveredAssetsMap {
-			hostNames = append(hostNames, k)
-		}
-		sort.Strings(hostNames)
-		hostOptions = append(hostOptions, hostNames...)
 		if s.AssetExplorerHost == "" {
 			s.AssetExplorerHost = "全部主机"
 		}
-
-		layerCode := "all"
-		switch s.AssetExplorerLayerTab {
-		case 1:
-			layerCode = "brew"
-		case 2:
-			layerCode = "docker"
-		case 3:
-			layerCode = "tools"
-		case 4:
-			layerCode = "os"
-		case 5:
-			layerCode = "workspace"
-		}
-
-		qLow := strings.ToLower(strings.TrimSpace(s.AssetExplorerQuery))
-		var rows []exploredAssetRow
-		for _, hName := range hostNames {
-			if s.AssetExplorerHost != "全部主机" && s.AssetExplorerHost != hName {
-				continue
+		sig := fmt.Sprintf("%d|%d|%d|%s|%s",
+			s.assetCacheGen, len(s.DiscoveredAssetsMap), s.AssetExplorerLayerTab, s.AssetExplorerHost, s.AssetExplorerQuery)
+		if s.assetCacheSig != sig {
+			hostOptions := []string{"全部主机"}
+			var hostNames []string
+			for k := range s.DiscoveredAssetsMap {
+				hostNames = append(hostNames, k)
 			}
-			inv := s.DiscoveredAssetsMap[hName]
-			for _, a := range inv.Assets {
-				lc, _ := classifyAssetLayerLabel(a)
-				if layerCode != "all" && lc != layerCode {
+			sort.Strings(hostNames)
+			hostOptions = append(hostOptions, hostNames...)
+
+			layerCode := "all"
+			switch s.AssetExplorerLayerTab {
+			case 1:
+				layerCode = "brew"
+			case 2:
+				layerCode = "docker"
+			case 3:
+				layerCode = "tools"
+			case 4:
+				layerCode = "os"
+			case 5:
+				layerCode = "workspace"
+			}
+
+			qLow := strings.ToLower(strings.TrimSpace(s.AssetExplorerQuery))
+			var rows []exploredAssetRow
+			for _, hName := range hostNames {
+				if s.AssetExplorerHost != "全部主机" && s.AssetExplorerHost != hName {
 					continue
 				}
-				if qLow != "" {
-					hay := strings.ToLower(a.Name + " " + a.Version + " " + a.Ecosystem + " " + a.Location + " " + a.ProjectName)
-					if !strings.Contains(hay, qLow) {
+				inv := s.DiscoveredAssetsMap[hName]
+				for _, a := range inv.Assets {
+					lc, _ := classifyAssetLayerLabel(a)
+					if layerCode != "all" && lc != layerCode {
 						continue
 					}
+					if qLow != "" {
+						hay := strings.ToLower(a.Name + " " + a.Version + " " + a.Ecosystem + " " + a.Location + " " + a.ProjectName)
+						if !strings.Contains(hay, qLow) {
+							continue
+						}
+					}
+					rows = append(rows, exploredAssetRow{HostName: hName, Item: a})
 				}
-				rows = append(rows, exploredAssetRow{HostName: hName, Item: a})
 			}
+			s.assetCachedHosts = hostOptions
+			s.assetCachedRows = rows
+			s.assetCacheSig = sig
 		}
+
+		hostOptions := s.assetCachedHosts
+		rows := s.assetCachedRows
 
 		ui.Column(c).Width(840).Height(560).Gap(12).Children(func() {
 			ui.Row(c).AlignItems(ui.Center).Children(func() {

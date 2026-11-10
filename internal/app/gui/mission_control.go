@@ -8,8 +8,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 	"github.com/egoist/mygo/ui/chart"
+	"github.com/egoist/mygo/ui/markdown"
 	"github.com/sixban6/security-sentinel/internal/infra/config"
 	"github.com/sixban6/security-sentinel/internal/infra/model"
 	"github.com/sixban6/security-sentinel/internal/ops/notify"
@@ -798,23 +800,27 @@ func (s *AppState) removeHost(hostKey string, displayName string) {
 }
 
 // ============================================================================
-// Page 4: Zero-Downtime High Availability (Clash/Mihomo Drain & Rolling Reboot)
+// Page 4: Zero-Downtime High Availability (Clash/Sing-box/Mihomo Drain & Rolling Reboot)
 // ============================================================================
 func (s *AppState) renderZeroDowntimeHAPage(c *ui.Context) {
 	t := c.Theme()
 	gw := s.Cfg.Gateway
 
-	ui.Column(c).Fill().Padding(22).Gap(14).Children(func() {
+	ui.Scroll(c.Key("ha-page-scroll")).Fill().Padding(22).Gap(14).Children(func() {
+		// 1. Header & Action Toolbar
 		ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
 			ui.Column(c).Grow(1).Gap(2).Children(func() {
-				ui.Text(c, "零中断旁路切流与平滑滚动重启 (Zero-Downtime HA)").FontSize(18).Bold()
-				ui.Text(c, "流量前置排空 ➔ 单机串行重启 ➔ 节点凭据强同步 ➔ 网关热重载探活 (全程防休眠锁保护)").
+				ui.Text(c, "软路由联动切流与 VPS 不断网重启").FontSize(18).Bold()
+				ui.Text(c, "当境外 VPS 升级完 Linux 内核需要重启时，自动让家里软路由先切到备用节点，避免重启期间全家断网").
 					FontSize(12).TextColor(t.TextMuted)
 			})
-			ui.Button(c.Key("ha-probe-gw"), "刷新网关节点延迟").
-				Disabled(!gw.Enabled).
-				OnClick(func() { s.RefreshHAGatewayAsync() })
-			ui.Button(c.Key("ha-reload-gw"), "仅重载网关").
+			ui.Button(c.Key("ha-probe-gw"), "刷新节点与延迟").
+				Disabled(!s.GatewayEnabled || s.GatewayProbing).
+				OnClick(func() {
+					s.RefreshHAGatewayAsync()
+					c.Toast("正在探测软路由策略组与节点延迟…")
+				})
+			ui.Button(c.Key("ha-reload-gw"), "仅重载软路由").
 				Disabled(!gw.Enabled || s.HARunning).
 				OnClick(func() { s.StartRollingRebootAsync(nil, true) })
 			ui.PrimaryButton(c.Key("ha-auto-roll"), "自动检测并滚动重启").
@@ -822,19 +828,64 @@ func (s *AppState) renderZeroDowntimeHAPage(c *ui.Context) {
 				OnClick(func() { s.StartRollingRebootAsync(nil, false) })
 		})
 
-		// Gateway Status Card
-		ui.Column(c).Padding(16, 20).Radius(12).Gap(8).Background(t.Surface).Border(1, t.Border).Children(func() {
-			if !gw.Enabled {
-				ui.Text(c, "当前未启用 Clash/Mihomo 网关切流 (gateway.enabled = false)，滚动重启将直接按单机串行模式执行。").
-					FontSize(13).TextColor(t.TextMuted)
-			} else {
-				ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
-					ui.Text(c, fmt.Sprintf("边缘路由网关: %s · 策略组 [%s]", gw.ClashAPIURL, gw.SelectorGroup)).Bold().Grow(1)
-					if s.GatewayActiveNode != "" {
-						ui.Badge(c, "当前承载: "+s.GatewayActiveNode).Background(ui.Hex("#10b981").Alpha(0.18)).TextColor(ui.Hex("#10b981"))
-					}
+		// 2. Plain-Language Explanation Card ("这个功能到底是干啥的？")
+		ui.Column(c).Padding(12, 16).Radius(10).Gap(4).
+			Background(t.Accent.Alpha(0.08)).Border(1, t.Accent.Alpha(0.28)).
+			Children(func() {
+				ui.Text(c, "💡 一句话看懂这个页面是干啥的：").FontSize(13).Bold().TextColor(t.Accent)
+				ui.Text(c, "平时你完全不需要管它。只有当你的远端代理 VPS（如主节点 A / 备用节点 B）更新了系统内核需要重启 (reboot) 时：直接重启会导致家里软路由断网 1~2 分钟。点此页面的「平滑切流重启」后，系统会自动：① 先把家里软路由流量切到备用 VPS ➔ ② 重启目标 VPS ➔ ③ 重启完成后自动同步配置并恢复，全程家里不断网。").
+					FontSize(12).TextColor(t.TextMuted)
+			})
+
+		// 3. Interactive Soft-Router Gateway Configuration & 1-Click Node Switcher Card
+		ui.Column(c).Padding(16, 20).Radius(12).Gap(10).Background(t.Surface).Border(1, t.Border).Children(func() {
+			ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
+				ui.Column(c).Grow(1).Gap(2).Children(func() {
+					ui.Text(c, "🛠️ 软路由网关自由配置 (Clash / Sing-box / Mihomo)").FontSize(15).Bold()
+					sub := firstNonEmptyStr(s.GatewayStatusMsg, "配置家里软路由的外部控制地址 (External Controller)，即可自动识别策略组并支持一键点选切节点")
+					ui.Text(c, sub).FontSize(12).TextColor(t.TextMuted)
 				})
+				ui.Switch(c.Key("sw-gw-en"), &s.GatewayEnabled).Label("启用软路由联动")
+				ui.PrimaryButton(c.Key("btn-save-gw"), "保存并连接软路由").OnClick(func() {
+					s.SaveGatewayConfig()
+					c.Toast("软路由网关配置已保存")
+				})
+			})
+
+			if s.GatewayEnabled {
+				ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
+					ui.TextInput(c.Key("in-gw-url"), &s.GatewayClashURL).
+						Placeholder("软路由 API 地址，如 http://192.168.1.1:9090").
+						Grow(1).Label("软路由 Clash API 地址")
+
+					if len(s.GatewayGroups) > 0 {
+						ui.Select(c.Key("sel-gw-grp"), &s.GatewaySelector, s.GatewayGroups).
+							Width(140).Label("切流策略组")
+					}
+					ui.TextInput(c.Key("in-gw-grp"), &s.GatewaySelector).
+						Placeholder("策略组名，如 #VPS 或 Proxy").
+						Width(140).Label("策略组名称")
+				})
+
+				ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
+					ui.TextInput(c.Key("in-gw-ssh"), &s.GatewaySSHHost).
+						Placeholder("软路由 SSH 地址 (可选，如 root@router)").
+						Width(220).Label("软路由 SSH")
+					ui.TextInput(c.Key("in-gw-reload"), &s.GatewayReloadCmds).
+						Placeholder("可选重载命令，多条用 && 连接，如 singctl sb gen && singctl sb restart").
+						Grow(1).Label("软路由重载命令")
+				})
+
 				if len(s.GatewayAllNodes) > 0 {
+					ui.Divider(c)
+					ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+						ui.Text(c, fmt.Sprintf("📡 策略组 [%s] 实时节点列表（点击任意按钮即可直接切换家里软路由当前节点）：", s.GatewaySelector)).
+							FontSize(12).Bold().Grow(1)
+						if s.GatewayActiveNode != "" {
+							ui.Badge(c, "当前正在走: "+s.GatewayActiveNode).
+								Background(ui.Hex("#10b981").Alpha(0.18)).TextColor(ui.Hex("#10b981"))
+						}
+					})
 					ui.Row(c).Gap(8).Wrap().Children(func() {
 						for _, n := range s.GatewayAllNodes {
 							nodeName := n
@@ -844,9 +895,14 @@ func (s *AppState) renderZeroDowntimeHAPage(c *ui.Context) {
 								lbl = fmt.Sprintf("%s (%dms)", nodeName, d)
 							}
 							if nodeName == s.GatewayActiveNode {
-								ui.PrimaryButton(c.Key("gwn-"+nodeName), lbl).OnClick(func() {})
+								ui.PrimaryButton(c.Key("gwn-"+nodeName), "✓ "+lbl).OnClick(func() {
+									s.SwitchHAGatewayNodeAsync(nodeName)
+								})
 							} else {
-								ui.Button(c.Key("gwn-"+nodeName), lbl).OnClick(func() {})
+								ui.Button(c.Key("gwn-"+nodeName), lbl).OnClick(func() {
+									s.SwitchHAGatewayNodeAsync(nodeName)
+									c.Toast("已切换软路由节点至: " + nodeName)
+								})
 							}
 						}
 					})
@@ -854,8 +910,9 @@ func (s *AppState) renderZeroDowntimeHAPage(c *ui.Context) {
 			}
 		})
 
-		// Rolling Nodes Peer Mapping Cards
+		// 4. Rolling Nodes Peer Mapping Cards
 		if len(s.Cfg.RollingNodes) > 0 {
+			ui.Text(c, "🔄 互备 VPS 节点列表（单点重启时自动切流至互备节点）").FontSize(13).Bold()
 			ui.Row(c).Gap(10).Wrap().Children(func() {
 				for _, rn := range s.Cfg.RollingNodes {
 					nodeCfg := rn
@@ -865,7 +922,7 @@ func (s *AppState) renderZeroDowntimeHAPage(c *ui.Context) {
 							ui.Row(c).AlignItems(ui.Center).Children(func() {
 								ui.Text(c, nodeCfg.ID).Bold().Grow(1)
 								if nodeCfg.Peer != "" {
-									ui.Badge(c, "互备 ⇄ "+nodeCfg.Peer)
+									ui.Badge(c, "备用机 ⇄ "+nodeCfg.Peer)
 								}
 							})
 							ui.Text(c, "SSH: "+nodeCfg.SSHHost).FontSize(11).TextColor(t.TextMuted)
@@ -879,12 +936,12 @@ func (s *AppState) renderZeroDowntimeHAPage(c *ui.Context) {
 			})
 		}
 
-		// Live Streaming HA Event Console
+		// 5. Live Streaming HA Event Console
 		ui.Text(c, "实时执行流水线日志").FontSize(13).Bold()
 		if s.HALogScroll.Y >= s.HALogScroll.MaxY {
 			s.HALogScroll.Y = math.MaxFloat32
 		}
-		ui.Scroll(c.Key("ha-log-scroll")).TrackScroll(&s.HALogScroll).Grow(1).Padding(12, 14).Radius(10).
+		ui.Scroll(c.Key("ha-log-scroll")).TrackScroll(&s.HALogScroll).Height(190).Padding(12, 14).Radius(10).
 			Background(t.Surface).Border(1, t.Border).Gap(4).
 			Children(func() {
 				if len(s.HAEvents) == 0 {
@@ -1107,14 +1164,14 @@ func (s *AppState) renderSettingsVaultPage(c *ui.Context) {
 					Width(180).Label("推送策略")
 			})
 			ui.Row(c).Gap(12).AlignItems(ui.Center).Children(func() {
-				ui.Text(c, fmt.Sprintf("SSH 终端应用偏好 (auto 当前识别为: %s)", ResolvePreferredTerminal("auto"))).Grow(1)
+				ui.Text(c, fmt.Sprintf("SSH 终端应用偏好 (auto 当前识别为: %s)", firstNonEmptyStr(s.DetectedAutoTerminal, "terminal"))).Grow(1)
 				ui.Select(c.Key("sel-pref-term"), &s.PreferredTerminal,
 					[]string{"auto", "wezterm", "ghostty", "iterm2", "kitty", "alacritty", "terminal"}).
 					Width(180).Label("SSH终端偏好")
 			})
 		})
 
-		// 2. Telegram Secure 6-Digit Pairing & Bot Token
+		// 3. Telegram Secure 6-Digit Pairing & Bot Token
 		ui.Column(c).Padding(16, 20).Radius(12).Gap(10).Background(t.Surface).Border(1, t.Border).Children(func() {
 			ui.Row(c).AlignItems(ui.Center).Children(func() {
 				ui.Text(c, "Telegram 移动端机器人 (防劫持配对绑定)").FontSize(15).Bold().Grow(1)
@@ -1171,9 +1228,27 @@ func (s *AppState) renderSettingsVaultPage(c *ui.Context) {
 			}
 		})
 
-		// 3. AI Provider & GitHub / Clash Keychain Vault
+		// 4. Unified AI Gateway (BaseURL + Gateway Token + Model)
 		ui.Column(c).Padding(16, 20).Radius(12).Gap(10).Background(t.Surface).Border(1, t.Border).Children(func() {
-			ui.Text(c, "多模型 AI 自愈引擎与第三方接口钥匙串").FontSize(15).Bold()
+			ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
+				ui.Column(c).Grow(1).Gap(2).Children(func() {
+					ui.Text(c, "🤖 AI 智能自愈网关与模型自由接入").FontSize(15).Bold()
+					ui.Text(c, "自由接入任意 OpenAI / Anthropic / Gemini 兼容网关 (NewAPI / OneAPI / OpenRouter / DeepSeek / 自建网关)").
+						FontSize(12).TextColor(t.TextMuted)
+				})
+				ui.Badge(c, "网关令牌: "+secrets.Masked(secrets.GetAIGatewayToken(s.AIProvider))).
+					Background(t.Accent.Alpha(0.14)).TextColor(t.Accent)
+				testLbl := "⚡ 测试网关连通性"
+				if s.AITesting {
+					testLbl = "⏳ 测试中…"
+				}
+				ui.Button(c.Key("btn-test-ai-gw"), testLbl).
+					Disabled(s.AITesting).
+					OnClick(func() {
+						s.TestAIGatewayAsync()
+					})
+			})
+
 			ui.Row(c).AlignItems(ui.Center).Children(func() {
 				ui.Text(c, "启用无官方补丁高危漏洞的 AI 现场规避研判").Grow(1)
 				ui.Switch(c.Key("sw-ai-en"), &s.AIEnabled).Label("启用 AI 研判")
@@ -1182,19 +1257,45 @@ func (s *AppState) renderSettingsVaultPage(c *ui.Context) {
 				ui.Text(c, "允许 AI 方案通过静态门禁后全自动下发 (关闭则在手术台等待人工批准)").Grow(1)
 				ui.Switch(c.Key("sw-ai-auto"), &s.AIAutoExec).Label("自动下发 AI 脚本")
 			})
+
 			ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
-				ui.Text(c, "AI 推理后端").Width(110)
-				ui.Select(c.Key("sel-ai-prov"), &s.AIProvider, []string{"gemini", "agy", "openai", "anthropic", "auto"}).
-					Width(160).Label("AI Provider")
-				ui.TextInput(c.Key("in-ai-model"), &s.AIModel).Placeholder("如 gemini-2.5-flash").Grow(1).Label("AI 模型")
+				ui.Text(c, "网关协议与模型").Width(110)
+				ui.Select(c.Key("sel-ai-prov"), &s.AIProvider, []string{"openai", "anthropic", "gemini", "agy", "auto"}).
+					Width(150).Label("网关协议")
+				ui.TextInput(c.Key("in-ai-model"), &s.AIModel).
+					Placeholder("请求模型名称，如 gpt-4o-mini / claude-3-7-sonnet / deepseek-chat / gemini-2.5-flash").
+					Grow(1).Label("请求模型")
 			})
 
-			ui.TextInput(c.Key("in-gemini-k"), &s.GeminiKeyDraft).Password().
-				Placeholder("Google Gemini API Key (当前: " + secrets.Masked(secrets.Get(secrets.KeyGeminiAPIKey)) + ")").Label("Gemini Key")
-			ui.TextInput(c.Key("in-openai-k"), &s.OpenAIKeyDraft).Password().
-				Placeholder("OpenAI / 兼容 API Key (当前: " + secrets.Masked(secrets.Get(secrets.KeyOpenAIAPIKey)) + ")").Label("OpenAI Key")
-			ui.TextInput(c.Key("in-anth-k"), &s.AnthropicKeyDraft).Password().
-				Placeholder("Anthropic Claude API Key (当前: " + secrets.Masked(secrets.Get(secrets.KeyAnthropicAPIKey)) + ")").Label("Anthropic Key")
+			if s.AIProvider != "agy" {
+				basePlaceholder := "网关 BaseURL，如 https://api.openai.com/v1 或 https://your-gateway.com/v1 (留空使用官方默认地址)"
+				if s.AIProvider == "anthropic" {
+					basePlaceholder = "网关 BaseURL，如 https://api.anthropic.com/v1 或自建兼容网关地址"
+				} else if s.AIProvider == "gemini" {
+					basePlaceholder = "网关 BaseURL，如 https://generativelanguage.googleapis.com/v1beta 或代理网关地址"
+				}
+				ui.TextInput(c.Key("in-ai-baseurl"), &s.AIBaseURL).
+					Placeholder(basePlaceholder).Label("网关 BaseURL")
+
+				ui.TextInput(c.Key("in-ai-gw-tok"), &s.AIGatewayTokenDraft).Password().
+					Placeholder("输入网关访问 Token / API Key 锁入系统钥匙串 (当前: " + secrets.Masked(secrets.GetAIGatewayToken(s.AIProvider)) + ")").
+					Label("网关 Token")
+			}
+
+			if s.AITestStatus != "" {
+				statusCol := t.Accent
+				if strings.HasPrefix(s.AITestStatus, "✅") {
+					statusCol = ui.Hex("#10b981")
+				} else if strings.HasPrefix(s.AITestStatus, "❌") {
+					statusCol = ui.Hex("#ef4444")
+				}
+				ui.Text(c, s.AITestStatus).FontSize(12).TextColor(statusCol)
+			}
+		})
+
+		// 5. Infrastructure Credentials Vault (GitHub & Clash)
+		ui.Column(c).Padding(16, 20).Radius(12).Gap(10).Background(t.Surface).Border(1, t.Border).Children(func() {
+			ui.Text(c, "🔑 第三方基础设施钥匙串 (GitHub 情报配额与 Clash 切流网关)").FontSize(15).Bold()
 			ui.TextInput(c.Key("in-gh-tok"), &s.GHTokenDraft).Password().
 				Placeholder("GitHub Token 提升配额至 5000次/h (当前: " + secrets.Masked(secrets.Get(secrets.KeyGitHubToken)) + ")").Label("GitHub Token")
 			ui.TextInput(c.Key("in-clash-sec"), &s.ClashSecretDraft).Password().
@@ -1206,7 +1307,10 @@ func (s *AppState) renderSettingsVaultPage(c *ui.Context) {
 func (s *AppState) renderSelfUpdateModal(c *ui.Context) {
 	t := c.Theme()
 	ui.Modal(c, &s.ShowUpdateModal, func() {
-		ui.Column(c).Width(560).Gap(12).Children(func() {
+		if s.LatestRelease == nil && !s.UpdateChecking && !s.Headless {
+			s.CheckForUpdatesAsync()
+		}
+		ui.Column(c).Width(580).Gap(12).Children(func() {
 			// Modal Header
 			ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
 				ui.Icon(c, IconShield).FontSize(22).TextColor(t.Accent)
@@ -1248,14 +1352,32 @@ func (s *AppState) renderSelfUpdateModal(c *ui.Context) {
 				}
 			})
 
-			// Release Notes Scrollable Area
-			if s.LatestRelease != nil && strings.TrimSpace(s.LatestRelease.Body) != "" {
-				ui.Text(c, fmt.Sprintf("📋 %s 版本更新说明", s.LatestRelease.TagName)).FontSize(13).Bold()
-				ui.Scroll(c.Key("upd-release-notes")).Height(220).Padding(12).Radius(8).
-					Background(t.Surface).Border(1, t.Border).Children(func() {
-					ui.Text(c, strings.TrimSpace(s.LatestRelease.Body)).FontSize(12)
-				})
+			// Release Notes Scrollable Area (always visible with formatted Markdown changelog!)
+			notesTitle := "📋 版本更新内容 (Changelog)"
+			if s.LatestRelease != nil && s.LatestRelease.TagName != "" {
+				notesTitle = fmt.Sprintf("📋 %s 版本更新内容 (Changelog)", s.LatestRelease.TagName)
 			}
+			ui.Row(c).AlignItems(ui.Center).Children(func() {
+				ui.Text(c, notesTitle).FontSize(13).Bold().Grow(1)
+				if s.LatestRelease != nil && strings.TrimSpace(s.LatestRelease.HTMLURL) != "" {
+					relURL := s.LatestRelease.HTMLURL
+					ui.Button(c.Key("upd-open-gh"), "在浏览器查看 Release").OnClick(func() {
+						if !s.Headless {
+							_ = mygo.Shell.OpenExternal(relURL)
+						}
+					})
+				}
+			})
+			ui.Scroll(c.Key("upd-release-notes")).Height(230).Padding(12, 14).Radius(8).
+				Background(t.Surface).Border(1, t.Border).Children(func() {
+				if s.UpdateChecking && s.LatestRelease == nil {
+					ui.Text(c, "⏳ 正在从 GitHub Release 拉取最新版本号与详细提交记录…").FontSize(12).TextColor(t.TextMuted)
+				} else if s.LatestRelease != nil && strings.TrimSpace(s.LatestRelease.Body) != "" {
+					markdown.View(c, strings.TrimSpace(s.LatestRelease.Body), &s.MDOpts)
+				} else {
+					ui.Text(c, "暂无更新日志详情，点击下方「重新检查」拉取最新 Release 变更记录。").FontSize(12).TextColor(t.TextMuted)
+				}
+			})
 
 			// Footer Actions
 			ui.Row(c).Gap(8).Justify(ui.End).AlignItems(ui.Center).Children(func() {

@@ -66,7 +66,26 @@ type AppState struct {
 	Report       model.AuditReport
 	DoctorItems  []model.DoctorItem
 	HistoryItems []model.RemediationRecord
+	IgnoreRules  []model.IgnoreRule
 	LastScanAt   time.Time
+
+	// Memoized / Cached Render State (eliminates 60-120fps disk/subprocess/sort stalls)
+	DetectedAutoTerminal string
+	lastTrayIconSig      string
+	lastTrayTitle        string
+	lastTrayTooltip      string
+	cveCacheGen          int
+	cveCacheSig          string
+	cveCachedFiltered    []model.Advisory
+	cveCachedAllCount    int
+	cveCachedLangCount   int
+	cveCachedOSCount     int
+	cveCachedKernelCount int
+	cveCachedEcoOptions  []string
+	assetCacheGen        int
+	assetCacheSig        string
+	assetCachedRows      []exploredAssetRow
+	assetCachedHosts     []string
 
 	// Async Activity Indicators
 	Scanning       bool
@@ -87,6 +106,14 @@ type AppState struct {
 	MDOpts          markdown.Options
 
 	// HA Gateway State
+	GatewayEnabled    bool
+	GatewayClashURL   string
+	GatewaySSHHost    string
+	GatewaySelector   string
+	GatewayReloadCmds string
+	GatewayGroups     []string
+	GatewayProbing    bool
+	GatewayStatusMsg  string
 	GatewayActiveNode string
 	GatewayAllNodes   []string
 	GatewayNodeDelays map[string]int
@@ -150,29 +177,33 @@ type AppState struct {
 	UpdateBannerDismissed bool
 
 	// Settings & Keychain Vault State
-	OpenAtLogin       bool
-	ScanModeLabel     string
-	ScanIntervalLabel string
-	DailyScanTimeStr  string
-	AdvisoryDaysLabel string
-	AutoFixEnabled    bool
-	AIEnabled         bool
-	AIAutoExec        bool
-	AIProvider        string
-	AIModel           string
-	NotifyPolicy      string
-	PreferredTerminal string
-	SmartPower        bool
-	RespectHotspot    bool
-	TGTokenDraft      string
-	TGPairCode        string
-	TGPairStatus      string
-	GHTokenDraft      string
-	GeminiKeyDraft    string
-	OpenAIKeyDraft    string
-	AnthropicKeyDraft string
-	ClashSecretDraft  string
-	StatusBanner      string
+	OpenAtLogin         bool
+	ScanModeLabel       string
+	ScanIntervalLabel   string
+	DailyScanTimeStr    string
+	AdvisoryDaysLabel   string
+	AutoFixEnabled      bool
+	AIEnabled           bool
+	AIAutoExec          bool
+	AIProvider          string
+	AIBaseURL           string
+	AIModel             string
+	AITesting           bool
+	AITestStatus        string
+	NotifyPolicy        string
+	PreferredTerminal   string
+	SmartPower          bool
+	RespectHotspot      bool
+	TGTokenDraft        string
+	TGPairCode          string
+	TGPairStatus        string
+	GHTokenDraft        string
+	AIGatewayTokenDraft string
+	GeminiKeyDraft      string
+	OpenAIKeyDraft      string
+	AnthropicKeyDraft   string
+	ClashSecretDraft    string
+	StatusBanner        string
 }
 
 func NewAppState(cfgPath string, headless bool) *AppState {
@@ -205,8 +236,13 @@ func NewAppState(cfgPath string, headless bool) *AppState {
 		SidebarWidth:      224,
 		TriageSplit:       340,
 		Online:            true,
-		DiffState:         &editor.DiffState{Old: oldBuf, New: newBuf, Editable: true, HunkActions: true},
-		GatewayNodeDelays:  make(map[string]int),
+		DiffState:            &editor.DiffState{Old: oldBuf, New: newBuf, Editable: true, HunkActions: true},
+		GatewayEnabled:       cfg.Gateway.Enabled,
+		GatewayClashURL:      firstNonEmptyStr(cfg.Gateway.ClashAPIURL, "http://127.0.0.1:9090"),
+		GatewaySSHHost:       cfg.Gateway.SSHHost,
+		GatewaySelector:      firstNonEmptyStr(cfg.Gateway.SelectorGroup, "Proxy"),
+		GatewayReloadCmds:    strings.Join(cfg.Gateway.ReloadCommands, " && "),
+		GatewayNodeDelays:    make(map[string]int),
 		SelectedSSH:        make(map[string]bool),
 		WorkspaceJobStatus: make(map[string]string),
 		DailyAdvisories:    make(map[string]model.Advisory),
@@ -216,15 +252,17 @@ func NewAppState(cfgPath string, headless bool) *AppState {
 		ScanIntervalLabel: hoursToIntervalLabel(cfg.Notifications.AutoScanHours),
 		DailyScanTimeStr:  firstNonEmptyStr(cfg.Notifications.DailyScanTime, "09:00"),
 		AdvisoryDaysLabel: daysToWindowLabel(cfg.Advisories.Days),
-		AutoFixEnabled:    cfg.AutoFix.Enabled,
-		AIEnabled:         cfg.AIRemediation.Enabled,
-		AIAutoExec:        cfg.AIRemediation.AutoExecute,
-		AIProvider:        aiProv,
-		AIModel:           cfg.AIRemediation.Model,
-		NotifyPolicy:      cfg.Notifications.Policy,
-		PreferredTerminal: prefTerm,
-		SmartPower:        cfg.Notifications.SmartPower,
-		RespectHotspot:    cfg.Notifications.RespectHotspot,
+		AutoFixEnabled:       cfg.AutoFix.Enabled,
+		AIEnabled:            cfg.AIRemediation.Enabled,
+		AIAutoExec:           cfg.AIRemediation.AutoExecute,
+		AIProvider:           aiProv,
+		AIBaseURL:            cfg.AIRemediation.BaseURL,
+		AIModel:              cfg.AIRemediation.Model,
+		NotifyPolicy:         cfg.Notifications.Policy,
+		PreferredTerminal:    prefTerm,
+		DetectedAutoTerminal: "terminal",
+		SmartPower:           cfg.Notifications.SmartPower,
+		RespectHotspot:       cfg.Notifications.RespectHotspot,
 	}
 
 	loadedRep, err := notify.LoadReport("")
@@ -237,8 +275,18 @@ func NewAppState(cfgPath string, headless bool) *AppState {
 		s.Report = reconcileReportWithConfig(model.AuditReport{ClusterScore: 100}, cfg)
 	}
 	s.HistoryItems = mem.ListHistory()
+	s.IgnoreRules = mem.ListIgnoreRules()
 	if cachedAdvs, ok := mem.GetAdvisories(cfg.Advisories.Days, cfg.Advisories.IncludeKernel); ok {
 		s.DailyAdvisories = cachedAdvs
+		s.cveCacheGen++
+	}
+	if !headless {
+		go func() {
+			det := ResolvePreferredTerminal("auto")
+			s.uiSync(func() {
+				s.DetectedAutoTerminal = det
+			})
+		}()
 	}
 	return s
 }
@@ -288,6 +336,7 @@ func (s *AppState) RefreshDailyCVEsAsync(forceFresh bool) {
 			s.CVEFeedLoading = false
 			if err == nil && len(advs) > 0 {
 				s.DailyAdvisories = advs
+				s.cveCacheGen++
 			}
 		})
 	}()
@@ -325,6 +374,7 @@ func (s *AppState) MuteSelectedVulnerability(entry SelectedVulnEntry, mode strin
 		recalculateHostPostureAfterMuteChange(h)
 	}
 
+	s.IgnoreRules = s.Mem.ListIgnoreRules()
 	s.recalculateClusterScore()
 	_ = notify.SaveReport(s.Report, "")
 	if !s.Headless {
@@ -335,6 +385,7 @@ func (s *AppState) MuteSelectedVulnerability(entry SelectedVulnEntry, mode strin
 // UnmuteRuleByKey removes an IgnoreRule and restores any matching IgnoredItems back into active monitoring immediately!
 func (s *AppState) UnmuteRuleByKey(ruleKey string) {
 	s.Mem.RemoveIgnoreRule(ruleKey)
+	s.IgnoreRules = s.Mem.ListIgnoreRules()
 	for hi := range s.Report.Hosts {
 		h := &s.Report.Hosts[hi]
 		var stillIgnored []model.IgnoreRule
@@ -1039,17 +1090,20 @@ func (s *AppState) StartAuditAsync(applyFixes bool, runAI bool) {
 		})
 
 		hist := s.Mem.ListHistory()
+		igRules := s.Mem.ListIgnoreRules()
 		cachedAdvs, _ := s.Mem.GetAdvisories(cfgSnap.Advisories.Days, cfgSnap.Advisories.IncludeKernel)
 		s.uiSync(func() {
 			s.Scanning = false
 			if len(cachedAdvs) > 0 {
 				s.DailyAdvisories = cachedAdvs
+				s.cveCacheGen++
 			}
 			if err == nil {
 				// Reconcile against LIVE s.Cfg so any host removed/added during scan is strictly respected!
 				s.Report = reconcileReportWithConfig(rep, s.Cfg)
 				_ = notify.SaveReport(s.Report, "")
 				s.HistoryItems = hist
+				s.IgnoreRules = igRules
 				s.LastScanAt = time.Now()
 				s.LoadedDiffKey = ""
 				s.StatusBanner = fmt.Sprintf("巡检完成 · 集群健康分 %d/100 (耗时 %.1fs)", s.Report.ClusterScore, float64(rep.DurationMS)/1000.0)
@@ -1300,13 +1354,16 @@ func (s *AppState) ApproveAndExecuteSelectedMitigation(entry SelectedVulnEntry) 
 		s.StatusBanner = "缺少配对的应急回滚脚本，拒绝下发执行"
 		return
 	}
-	if ok, msg := ai.VerifyScriptSafety(editedMitigate, entry.Host.OSContext); !ok {
-		s.StatusBanner = "静态安全门禁拦截: " + msg
-		return
-	}
 
 	s.AIRunning = true
 	go func() {
+		if ok, msg := ai.VerifyScriptSafety(editedMitigate, entry.Host.OSContext); !ok {
+			s.uiSync(func() {
+				s.AIRunning = false
+				s.StatusBanner = "静态安全门禁拦截: " + msg
+			})
+			return
+		}
 		var releaseAwake func()
 		if !s.Headless {
 			releaseAwake = mygo.Power.KeepAwake("Security Sentinel 正在远程部署加固脚本并探活", false)
@@ -1370,33 +1427,94 @@ func (s *AppState) ExecuteRollbackAsync(hostKey, cveID string) {
 	}()
 }
 
-// RefreshHAGatewayAsync queries Clash/Mihomo active proxy and node latencies.
-func (s *AppState) RefreshHAGatewayAsync() {
-	if !s.Cfg.Gateway.Enabled {
+// SaveGatewayConfig persists soft-router gateway configuration to sentinel.yaml and refreshes gateway nodes.
+func (s *AppState) SaveGatewayConfig() {
+	s.Cfg.Gateway.Enabled = s.GatewayEnabled
+	s.Cfg.Gateway.ClashAPIURL = strings.TrimSpace(s.GatewayClashURL)
+	s.Cfg.Gateway.SSHHost = strings.TrimSpace(s.GatewaySSHHost)
+	s.Cfg.Gateway.SelectorGroup = strings.TrimSpace(s.GatewaySelector)
+
+	var reloadCmds []string
+	for _, part := range strings.Split(s.GatewayReloadCmds, "&&") {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			reloadCmds = append(reloadCmds, trimmed)
+		}
+	}
+	s.Cfg.Gateway.ReloadCommands = reloadCmds
+
+	savedPath, err := config.Save(s.Cfg, s.CfgPath)
+	if err == nil {
+		s.CfgPath = savedPath
+		s.Cfg.SourcePath = savedPath
+	}
+	if s.GatewayEnabled {
+		s.RefreshHAGatewayAsync()
+	} else {
+		s.GatewayStatusMsg = "已关闭软路由网关切流联动"
+	}
+}
+
+// SwitchHAGatewayNodeAsync switches the active node in the soft-router selector group in 1 click.
+func (s *AppState) SwitchHAGatewayNodeAsync(targetNode string) {
+	if !s.Cfg.Gateway.Enabled || strings.TrimSpace(targetNode) == "" {
 		return
 	}
+	cfgSnap := s.Cfg
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		mgr := ha.NewManager(cfgSnap, nil)
+		err := mgr.SwitchGatewayNode(ctx, targetNode)
+		s.uiSync(func() {
+			if err != nil {
+				s.GatewayStatusMsg = "切换节点失败: " + err.Error()
+			} else {
+				s.GatewayActiveNode = targetNode
+				s.GatewayStatusMsg = fmt.Sprintf("✅ 已将软路由 [%s] 策略组切换至节点: %s", s.GatewaySelector, targetNode)
+			}
+		})
+	}()
+}
+
+// RefreshHAGatewayAsync queries Clash/Sing-box/Mihomo selector groups, active proxy, and node latencies without spamming global banners.
+func (s *AppState) RefreshHAGatewayAsync() {
+	if !s.Cfg.Gateway.Enabled || s.GatewayProbing {
+		return
+	}
+	s.GatewayProbing = true
 	cfgSnap := s.Cfg
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 		defer cancel()
 		mgr := ha.NewManager(cfgSnap, nil)
-		active, all, err := mgr.GetGatewayActiveNode(ctx)
+		resolvedSel, groups, active, all, err := mgr.DiscoverGatewayGroups(ctx)
 		delays := make(map[string]int)
 		if err == nil {
 			for i, n := range all {
-				if i >= 8 {
+				if i >= 10 {
 					break
 				}
 				delays[n] = mgr.TestNodeDelay(ctx, n)
 			}
 		}
 		s.uiSync(func() {
+			s.GatewayProbing = false
 			if err == nil {
+				if resolvedSel != "" && resolvedSel != s.Cfg.Gateway.SelectorGroup {
+					s.Cfg.Gateway.SelectorGroup = resolvedSel
+					s.GatewaySelector = resolvedSel
+					_, _ = config.Save(s.Cfg, s.CfgPath)
+				}
+				if len(groups) > 0 {
+					s.GatewayGroups = groups
+				}
 				s.GatewayActiveNode = active
 				s.GatewayAllNodes = all
 				s.GatewayNodeDelays = delays
+				s.GatewayStatusMsg = fmt.Sprintf("🟢 已连接软路由 (%s) · 策略组 [%s] · 当前节点: %s",
+					s.Cfg.Gateway.ClashAPIURL, firstNonEmptyStr(resolvedSel, s.GatewaySelector), active)
 			} else {
-				s.StatusBanner = "查询网关 Clash API 失败: " + err.Error()
+				s.GatewayStatusMsg = "⚠️ 当前未连通软路由接口 (" + err.Error() + ") — 若不在局域网内可忽略或临时关闭开关"
 			}
 		})
 	}()
@@ -1476,6 +1594,7 @@ func (s *AppState) SaveSettings() {
 	s.Cfg.AIRemediation.Enabled = s.AIEnabled
 	s.Cfg.AIRemediation.AutoExecute = s.AIAutoExec
 	s.Cfg.AIRemediation.Provider = s.AIProvider
+	s.Cfg.AIRemediation.BaseURL = strings.TrimSpace(s.AIBaseURL)
 	if strings.TrimSpace(s.AIModel) != "" {
 		s.Cfg.AIRemediation.Model = strings.TrimSpace(s.AIModel)
 	}
@@ -1498,6 +1617,7 @@ func (s *AppState) SaveSettings() {
 	}
 	saveKey(secrets.KeyTelegramBotToken, &s.TGTokenDraft)
 	saveKey(secrets.KeyGitHubToken, &s.GHTokenDraft)
+	saveKey(secrets.KeyAIGatewayToken, &s.AIGatewayTokenDraft)
 	saveKey(secrets.KeyGeminiAPIKey, &s.GeminiKeyDraft)
 	saveKey(secrets.KeyOpenAIAPIKey, &s.OpenAIKeyDraft)
 	saveKey(secrets.KeyAnthropicAPIKey, &s.AnthropicKeyDraft)
@@ -1508,6 +1628,32 @@ func (s *AppState) SaveSettings() {
 	}
 	_, _, schedSummary := s.NextScheduledScanInfo(time.Now())
 	s.StatusBanner = "设置已保存 (" + schedSummary + ")"
+}
+
+// TestAIGatewayAsync saves any draft gateway settings and tests live connectivity & latency in the background.
+func (s *AppState) TestAIGatewayAsync() {
+	if s.AITesting {
+		return
+	}
+	s.SaveSettings()
+	s.AITesting = true
+	s.AITestStatus = "⏳ 正在测试 AI 网关连通性…"
+	aiCfg := s.Cfg.AIRemediation
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		eng := ai.NewEngine(aiCfg, s.Mem)
+		latencyMS, modelUsed, err := eng.TestConnectivity(ctx)
+		s.uiSync(func() {
+			s.AITesting = false
+			if err != nil {
+				s.AITestStatus = "❌ 连通性测试未通过: " + err.Error()
+			} else {
+				s.AITestStatus = fmt.Sprintf("✅ 网关连接畅通！模型 [%s] 响应成功 (耗时 %d ms)", modelUsed, latencyMS)
+			}
+		})
+	}()
 }
 
 // NextScheduledScanInfo computes the next scheduled run time, whether a catch-up/scheduled run is due now,

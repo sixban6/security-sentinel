@@ -58,33 +58,116 @@ func (m *Manager) clashHeaders() http.Header {
 	return h
 }
 
-// GetGatewayActiveNode returns the active node name and all candidate node names in the configured selector group.
-func (m *Manager) GetGatewayActiveNode(ctx context.Context) (active string, all []string, err error) {
+// DiscoverGatewayGroups queries /proxies on the Clash/Sing-box/Mihomo gateway, returns all available
+// Selector groups, auto-resolves the best matching group if the configured SelectorGroup was renamed (e.g. DIY-Node -> #VPS),
+// and returns the active node + candidate nodes for that group.
+func (m *Manager) DiscoverGatewayGroups(ctx context.Context) (resolvedSelector string, selectorGroups []string, active string, all []string, err error) {
 	gw := m.Cfg.Gateway
 	if !gw.Enabled {
-		return "", nil, nil
+		return "", nil, "", nil, nil
 	}
-	apiURL := strings.TrimRight(gw.ClashAPIURL, "/")
+	apiURL := strings.TrimRight(strings.TrimSpace(gw.ClashAPIURL), "/")
 	if apiURL == "" {
 		apiURL = "http://127.0.0.1:9090"
 	}
-	selector := gw.SelectorGroup
-	if selector == "" {
-		selector = "Proxy"
+	prefSelector := strings.TrimSpace(gw.SelectorGroup)
+	if prefSelector == "" {
+		prefSelector = "Proxy"
 	}
-	u := fmt.Sprintf("%s/proxies/%s", apiURL, url.PathEscape(selector))
+
+	// 1. Try querying /proxies (full map of groups & nodes)
+	uAll := fmt.Sprintf("%s/proxies", apiURL)
+	reqAll, err := http.NewRequestWithContext(ctx, http.MethodGet, uAll, nil)
+	if err == nil {
+		reqAll.Header = m.clashHeaders()
+		if resp, errDo := m.HTTP.Do(reqAll); errDo == nil {
+			defer resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				type proxyGroupItem struct {
+					Type string   `json:"type"`
+					Now  string   `json:"now"`
+					All  []string `json:"all"`
+				}
+				var parsed struct {
+					Proxies map[string]proxyGroupItem `json:"proxies"`
+				}
+				body, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+				if json.Unmarshal(body, &parsed) == nil && len(parsed.Proxies) > 0 {
+					// Collect all Selector groups
+					for name, item := range parsed.Proxies {
+						tLow := strings.ToLower(item.Type)
+						if tLow == "selector" || (name == prefSelector && len(item.All) > 0) {
+							if name != "GLOBAL" {
+								selectorGroups = append(selectorGroups, name)
+							}
+						}
+					}
+					// Sort selectorGroups deterministically while prioritizing #VPS, #Nodes, Proxy
+					prioritizeSelectorGroups(selectorGroups)
+
+					// Exact match on configured selector
+					if g, ok := parsed.Proxies[prefSelector]; ok && len(g.All) > 0 {
+						return prefSelector, selectorGroups, g.Now, g.All, nil
+					}
+
+					// Smart fallback 1: Find the Selector group whose candidate nodes match rolling_nodes keywords!
+					var keywords []string
+					for _, rn := range m.Cfg.RollingNodes {
+						keywords = append(keywords, rn.Keywords...)
+					}
+					bestGroup := ""
+					bestHits := 0
+					for _, gName := range selectorGroups {
+						g := parsed.Proxies[gName]
+						hits := 0
+						for _, cand := range g.All {
+							for _, kw := range keywords {
+								if kw != "" && strings.Contains(cand, kw) {
+									hits++
+									break
+								}
+							}
+						}
+						if hits > bestHits {
+							bestHits = hits
+							bestGroup = gName
+						}
+					}
+					if bestGroup != "" {
+						g := parsed.Proxies[bestGroup]
+						return bestGroup, selectorGroups, g.Now, g.All, nil
+					}
+
+					// Smart fallback 2: Common selector group names (#VPS, #Nodes, Proxy)
+					for _, common := range []string{"#VPS", "#Nodes", "Proxy", "节点选择", "自动选择"} {
+						if g, ok := parsed.Proxies[common]; ok && len(g.All) > 0 {
+							return common, selectorGroups, g.Now, g.All, nil
+						}
+					}
+					if len(selectorGroups) > 0 {
+						first := selectorGroups[0]
+						g := parsed.Proxies[first]
+						return first, selectorGroups, g.Now, g.All, nil
+					}
+				}
+			}
+		}
+	}
+
+	// 2. Direct fallback to /proxies/{selector} (also used by mock servers in unit tests)
+	u := fmt.Sprintf("%s/proxies/%s", apiURL, url.PathEscape(prefSelector))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return "", nil, err
+		return "", nil, "", nil, err
 	}
 	req.Header = m.clashHeaders()
 	resp, err := m.HTTP.Do(req)
 	if err != nil {
-		return "", nil, err
+		return "", nil, "", nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", nil, fmt.Errorf("Clash API HTTP %d", resp.StatusCode)
+		return "", nil, "", nil, fmt.Errorf("Clash API HTTP %d (策略组 %s 不存在或未授权)", resp.StatusCode, prefSelector)
 	}
 	var data struct {
 		Now string   `json:"now"`
@@ -92,9 +175,41 @@ func (m *Manager) GetGatewayActiveNode(ctx context.Context) (active string, all 
 	}
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err := json.Unmarshal(body, &data); err != nil {
-		return "", nil, err
+		return "", nil, "", nil, err
 	}
-	return data.Now, data.All, nil
+	return prefSelector, []string{prefSelector}, data.Now, data.All, nil
+}
+
+func prioritizeSelectorGroups(groups []string) {
+	rank := func(s string) int {
+		switch s {
+		case "#VPS":
+			return 0
+		case "#Nodes":
+			return 1
+		case "Proxy":
+			return 2
+		default:
+			return 10
+		}
+	}
+	for i := 0; i < len(groups); i++ {
+		for j := i + 1; j < len(groups); j++ {
+			ri, rj := rank(groups[i]), rank(groups[j])
+			if rj < ri || (ri == rj && groups[j] < groups[i]) {
+				groups[i], groups[j] = groups[j], groups[i]
+			}
+		}
+	}
+}
+
+// GetGatewayActiveNode returns the active node name and all candidate node names in the configured (or auto-discovered) selector group.
+func (m *Manager) GetGatewayActiveNode(ctx context.Context) (active string, all []string, err error) {
+	resolved, _, active, all, err := m.DiscoverGatewayGroups(ctx)
+	if err == nil && resolved != "" {
+		m.Cfg.Gateway.SelectorGroup = resolved
+	}
+	return active, all, err
 }
 
 // SwitchGatewayNode switches the Clash/Mihomo selector group to targetNode.
@@ -103,10 +218,17 @@ func (m *Manager) SwitchGatewayNode(ctx context.Context, targetNode string) erro
 	if !gw.Enabled {
 		return nil
 	}
-	apiURL := strings.TrimRight(gw.ClashAPIURL, "/")
-	selector := gw.SelectorGroup
+	apiURL := strings.TrimRight(strings.TrimSpace(gw.ClashAPIURL), "/")
+	if apiURL == "" {
+		apiURL = "http://127.0.0.1:9090"
+	}
+	selector := strings.TrimSpace(gw.SelectorGroup)
 	if selector == "" {
 		selector = "Proxy"
+	}
+	if resolved, _, _, _, err := m.DiscoverGatewayGroups(ctx); err == nil && resolved != "" {
+		selector = resolved
+		m.Cfg.Gateway.SelectorGroup = resolved
 	}
 	u := fmt.Sprintf("%s/proxies/%s", apiURL, url.PathEscape(selector))
 	payload, _ := json.Marshal(map[string]string{"name": targetNode})
