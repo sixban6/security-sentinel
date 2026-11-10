@@ -8,6 +8,7 @@ import (
 
 	"github.com/egoist/mygo/ui"
 	"github.com/sixban6/security-sentinel/internal/infra/model"
+	"github.com/sixban6/security-sentinel/internal/ops/updater"
 )
 
 func TestFlyoutAndMissionControlViewsRenderAndNavigateCleanly(t *testing.T) {
@@ -232,5 +233,39 @@ func TestLegacyStatusReconciliationImmediateRemoveAndGeminiDefault(t *testing.T)
 	mt.Frame()
 	if len(state.Report.Hosts) != 2 || mt.HasText("root@vps_alpha") {
 		t.Fatalf("expected root@vps_alpha to be removed immediately without waiting for scan, hosts=%+v", state.Report.Hosts)
+	}
+}
+
+func TestSelfUpdateBannerSidebarAndModalUX(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SENTINEL_DISABLE_KEYCHAIN", "1")
+
+	state := NewAppState("", true)
+	state.LatestRelease = &updater.ReleaseInfo{
+		TagName:     "v9.9.9",
+		HasUpdate:   true,
+		Body:        "### What's Changed\n- 新增全局一键热更新横幅与版本说明弹窗",
+		PublishedAt: "2026-11-10T22:00:00Z",
+	}
+	state.UpdateMessage = "🎉 发现新版本 v9.9.9（当前 v" + model.Version + "）— 支持一键原子热更新"
+
+	// 1. Flyout shows prominent upgrade button
+	ft := ui.NewTester(state.FlyoutView, 390, 480)
+	if !ft.HasText("🚀 升级 v9.9.9") {
+		t.Fatalf("expected Flyout to show prominent upgrade button, texts=%v", ft.Texts())
+	}
+
+	// 2. Mission Control shows both Sidebar upgrade callout and Top Update Banner
+	mt := ui.NewTester(state.MissionControlView, 1140, 740)
+	if !mt.HasText("🚀 新版本 v9.9.9 · 立即升级") || !mt.HasText("立即升级 v9.9.9") {
+		t.Fatalf("expected Sidebar and Top Banner to display v9.9.9 upgrade actions, texts=%v", mt.Texts())
+	}
+
+	// 3. Clicking "更新说明" opens the Self-Update Release Notes Modal
+	if err := mt.Click("更新说明"); err != nil {
+		t.Fatalf("click release notes button: %v", err)
+	}
+	if !state.ShowUpdateModal || !mt.HasText("版本检查与一键热更新") || !mt.HasText("新增全局一键热更新横幅与版本说明弹窗") {
+		t.Fatalf("expected Self-Update Modal to display release notes, texts=%v", mt.Texts())
 	}
 }

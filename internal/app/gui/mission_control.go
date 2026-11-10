@@ -56,10 +56,11 @@ func (s *AppState) MissionControlView(c *ui.Context) {
 		},
 	).Fill()
 
-	// SSH Config Auto-Discovery, Manual Add, and Panorama Asset Explorer Modals
+	// SSH Config Auto-Discovery, Manual Add, Panorama Asset Explorer, and Self-Update Modals
 	s.renderSSHOnboardingModal(c)
 	s.renderManualAddHostModal(c)
 	s.renderAssetExplorerModal(c)
+	s.renderSelfUpdateModal(c)
 
 	// Safety Confirmation AlertDialog before Remote Rollback
 	if s.PendingRollback != nil {
@@ -102,13 +103,40 @@ func (s *AppState) MissionControlView(c *ui.Context) {
 func (s *AppState) renderSidebar(c *ui.Context, totalUnmit int, retirable int) {
 	t := c.Theme()
 	ui.Column(c).Fill().Background(t.Surface).Children(func() {
-		// App Brand Header
-		ui.Row(c).Padding(16, 16, 8, 16).Gap(10).AlignItems(ui.Center).Children(func() {
-			ui.Icon(c, IconShield).FontSize(22).TextColor(t.Accent)
-			ui.Column(c).Gap(1).Children(func() {
-				ui.Text(c, "Security Sentinel").FontSize(14).Bold()
-				ui.Text(c, "v"+model.Version+" Native GPU").FontSize(11).TextColor(t.TextMuted)
+		// App Brand Header + Interactive Version & Update Entry
+		ui.Column(c).Padding(16, 14, 8, 14).Gap(8).Children(func() {
+			ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
+				ui.Icon(c, IconShield).FontSize(22).TextColor(t.Accent)
+				ui.Column(c).Grow(1).Gap(2).Children(func() {
+					ui.Text(c, "Security Sentinel").FontSize(14).Bold()
+					ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
+						ui.Text(c, "v"+model.Version).FontSize(11).TextColor(t.TextMuted)
+						updBtnLabel := "检查更新"
+						if s.UpdateChecking {
+							updBtnLabel = "检查中…"
+						} else if s.UpdateApplying {
+							updBtnLabel = "升级中…"
+						} else if s.LatestRelease != nil && !s.LatestRelease.HasUpdate {
+							updBtnLabel = "已最新"
+						}
+						ui.Button(c.Key("sidebar-chk-upd"), updBtnLabel).
+							Disabled(s.UpdateChecking || s.UpdateApplying).
+							OnClick(func() {
+								s.ShowUpdateModal = true
+								s.CheckForUpdatesAsync()
+							})
+					})
+				})
 			})
+
+			if s.LatestRelease != nil && s.LatestRelease.HasUpdate {
+				ui.PrimaryButton(c.Key("sidebar-new-ver-btn"), "🚀 新版本 "+s.LatestRelease.TagName+" · 立即升级").
+					FillWidth().
+					Disabled(s.UpdateApplying).
+					OnClick(func() {
+						s.ShowUpdateModal = true
+					})
+			}
 		})
 
 		activeWSPkgs, _, orphanVenvs := s.WorkspaceCounts()
@@ -169,10 +197,47 @@ func (s *AppState) renderSidebar(c *ui.Context, totalUnmit int, retirable int) {
 }
 
 func (s *AppState) renderTopBanner(c *ui.Context) {
+	t := c.Theme()
+
+	// 1. Live Self-Upgrade Progress Banner or New Version Available Callout
+	if s.UpdateApplying {
+		ui.Column(c).Padding(10, 20).Gap(6).
+			Background(ui.Hex("#10b981").Alpha(0.14)).BorderWidth(0, 0, 1, 0).BorderColor(t.Border).
+			Children(func() {
+				ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
+					ui.Spinner(c).Label("Upgrading")
+					ui.Text(c, firstNonEmptyStr(s.UpdateMessage, "正在下载并原子替换最新版本…")).Grow(1).FontSize(12).Bold()
+					ui.Button(c.Key("top-upd-detail"), "查看进度").OnClick(func() {
+						s.ShowUpdateModal = true
+					})
+				})
+				ui.Progress(c, max(0.05, s.UpdateProgress)).Label("Self-upgrade progress")
+			})
+	} else if s.LatestRelease != nil && s.LatestRelease.HasUpdate && !s.UpdateBannerDismissed {
+		rel := s.LatestRelease
+		ui.Row(c).Padding(8, 20).Gap(10).AlignItems(ui.Center).
+			Background(ui.Hex("#10b981").Alpha(0.14)).BorderWidth(0, 0, 1, 0).BorderColor(t.Border).
+			Children(func() {
+				ui.Badge(c, "NEW").Background(ui.Hex("#10b981")).TextColor(ui.Hex("#ffffff"))
+				ui.Text(c, fmt.Sprintf("🎉 发现新版本 %s（当前 v%s）— 支持 SHA-256 校验一键热更新并自动重启", rel.TagName, model.Version)).
+					Grow(1).FontSize(12).Bold().SingleLine()
+				ui.Button(c.Key("top-upd-notes"), "更新说明").OnClick(func() {
+					s.ShowUpdateModal = true
+				})
+				ui.PrimaryButton(c.Key("top-upd-apply"), "立即升级 "+rel.TagName).OnClick(func() {
+					s.ShowUpdateModal = true
+					s.ApplySelfUpgradeAsync()
+				})
+				if ui.Button(c.Key("top-upd-dismiss"), "稍后").Clicked() {
+					s.UpdateBannerDismissed = true
+				}
+			})
+	}
+
+	// 2. General Status Banner
 	if s.StatusBanner == "" {
 		return
 	}
-	t := c.Theme()
 	ui.Row(c).Padding(8, 20).Gap(10).AlignItems(ui.Center).
 		Background(t.Accent.Alpha(0.10)).BorderWidth(0, 0, 1, 0).BorderColor(t.Border).
 		Children(func() {
@@ -937,20 +1002,45 @@ func (s *AppState) renderSettingsVaultPage(c *ui.Context) {
 		// 0. Version & GitHub Actions Prebuilt Self-Updater Card
 		ui.Column(c).Padding(16, 20).Radius(12).Gap(10).Background(t.Surface).Border(1, t.Border).Children(func() {
 			ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
-				ui.Column(c).Grow(1).Gap(2).Children(func() {
-					ui.Text(c, fmt.Sprintf("版本更新与自动升级 (当前版本 v%s)", model.Version)).FontSize(15).Bold()
+				ui.Column(c).Grow(1).Gap(4).Children(func() {
+					ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+						ui.Text(c, fmt.Sprintf("版本更新与自动升级 (当前版本 v%s)", model.Version)).FontSize(15).Bold()
+						if s.LatestRelease != nil {
+							if s.LatestRelease.HasUpdate {
+								ui.Badge(c, "发现新版本 "+s.LatestRelease.TagName).
+									Background(ui.Hex("#10b981").Alpha(0.18)).TextColor(ui.Hex("#10b981"))
+							} else {
+								ui.Badge(c, "已是最新版本").
+									Background(t.Accent.Alpha(0.14)).TextColor(t.Accent)
+							}
+						}
+					})
 					sub := firstNonEmptyStr(s.UpdateMessage, "直接从 GitHub Actions 官方 Release 下载预编译包并校验 SHA-256 原子热更新")
 					ui.Text(c, sub).FontSize(12).TextColor(t.TextMuted)
 				})
+				if s.LatestRelease != nil && strings.TrimSpace(s.LatestRelease.Body) != "" {
+					ui.Button(c.Key("btn-upd-notes"), "查看更新说明").OnClick(func() {
+						s.ShowUpdateModal = true
+					})
+				}
 				ui.Button(c.Key("btn-chk-upd"), "检查新版本").
 					Disabled(s.UpdateChecking || s.UpdateApplying).
-					OnClick(func() { s.CheckForUpdatesAsync() })
+					OnClick(func() {
+						s.ShowUpdateModal = true
+						s.CheckForUpdatesAsync()
+					})
 				if s.LatestRelease != nil && s.LatestRelease.HasUpdate {
 					ui.PrimaryButton(c.Key("btn-apply-upd"), "一键升级至 "+s.LatestRelease.TagName).
 						Disabled(s.UpdateApplying).
-						OnClick(func() { s.ApplySelfUpgradeAsync() })
+						OnClick(func() {
+							s.ShowUpdateModal = true
+							s.ApplySelfUpgradeAsync()
+						})
 				}
 			})
+			if s.UpdateApplying {
+				ui.Progress(c, max(0.05, s.UpdateProgress)).Label("Self-upgrade progress")
+			}
 		})
 
 		// 1. Built-in Smart Scan Schedule & Advisory Time-Window Card
@@ -1109,6 +1199,83 @@ func (s *AppState) renderSettingsVaultPage(c *ui.Context) {
 				Placeholder("GitHub Token 提升配额至 5000次/h (当前: " + secrets.Masked(secrets.Get(secrets.KeyGitHubToken)) + ")").Label("GitHub Token")
 			ui.TextInput(c.Key("in-clash-sec"), &s.ClashSecretDraft).Password().
 				Placeholder("Clash / Mihomo REST API Secret (当前: " + secrets.Masked(secrets.Get(secrets.KeyClashAPISecret)) + ")").Label("Clash Secret")
+		})
+	})
+}
+
+func (s *AppState) renderSelfUpdateModal(c *ui.Context) {
+	t := c.Theme()
+	ui.Modal(c, &s.ShowUpdateModal, func() {
+		ui.Column(c).Width(560).Gap(12).Children(func() {
+			// Modal Header
+			ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
+				ui.Icon(c, IconShield).FontSize(22).TextColor(t.Accent)
+				ui.Column(c).Grow(1).Gap(2).Children(func() {
+					ui.Text(c, "版本检查与一键热更新").FontSize(18).Bold()
+					ui.Text(c, fmt.Sprintf("当前运行版本: v%s · 官方预编译包 SHA-256 原子替换", model.Version)).
+						FontSize(12).TextColor(t.TextMuted)
+				})
+				if s.LatestRelease != nil {
+					if s.LatestRelease.HasUpdate {
+						ui.Badge(c, "新版本 "+s.LatestRelease.TagName).
+							Background(ui.Hex("#10b981").Alpha(0.18)).TextColor(ui.Hex("#10b981"))
+					} else {
+						ui.Badge(c, "已是最新版本").
+							Background(t.Accent.Alpha(0.14)).TextColor(t.Accent)
+					}
+				}
+			})
+
+			ui.Divider(c)
+
+			// Status & Live Progress Bar
+			statusText := firstNonEmptyStr(s.UpdateMessage, "点击「重新检查」获取 GitHub Release 最新版本状态")
+			ui.Column(c).Padding(12, 14).Radius(8).Gap(8).Background(t.Surface).Border(1, t.Border).Children(func() {
+				ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+					if s.UpdateChecking || s.UpdateApplying {
+						ui.Spinner(c).Label("Update busy")
+					}
+					ui.Text(c, statusText).Grow(1).FontSize(12).Bold()
+				})
+				if s.UpdateApplying {
+					ui.Progress(c, max(0.05, s.UpdateProgress)).Label("Self-upgrade progress")
+				}
+				if s.LatestRelease != nil && strings.TrimSpace(s.LatestRelease.PublishedAt) != "" {
+					ui.Text(c, fmt.Sprintf("最新版本: %s · 发布时间: %s",
+						s.LatestRelease.TagName,
+						s.LatestRelease.PublishedAt,
+					)).FontSize(11).TextColor(t.TextMuted)
+				}
+			})
+
+			// Release Notes Scrollable Area
+			if s.LatestRelease != nil && strings.TrimSpace(s.LatestRelease.Body) != "" {
+				ui.Text(c, fmt.Sprintf("📋 %s 版本更新说明", s.LatestRelease.TagName)).FontSize(13).Bold()
+				ui.Scroll(c.Key("upd-release-notes")).Height(220).Padding(12).Radius(8).
+					Background(t.Surface).Border(1, t.Border).Children(func() {
+					ui.Text(c, strings.TrimSpace(s.LatestRelease.Body)).FontSize(12)
+				})
+			}
+
+			// Footer Actions
+			ui.Row(c).Gap(8).Justify(ui.End).AlignItems(ui.Center).Children(func() {
+				ui.Button(c.Key("upd-modal-recheck"), "重新检查").
+					Disabled(s.UpdateChecking || s.UpdateApplying).
+					OnClick(func() {
+						s.CheckForUpdatesAsync()
+					})
+				ui.Spacer(c)
+				if ui.Button(c.Key("upd-modal-close"), "关闭").Clicked() {
+					s.ShowUpdateModal = false
+				}
+				if s.LatestRelease != nil && s.LatestRelease.HasUpdate {
+					ui.PrimaryButton(c.Key("upd-modal-apply"), "🚀 一键下载升级并重启 ("+s.LatestRelease.TagName+")").
+						Disabled(s.UpdateApplying).
+						OnClick(func() {
+							s.ApplySelfUpgradeAsync()
+						})
+				}
+			})
 		})
 	})
 }

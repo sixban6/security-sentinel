@@ -152,10 +152,22 @@ func (s *AppState) FlyoutView(c *ui.Context) {
 		ui.Divider(c)
 
 		// 4. Footer Bar
-		ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
-			ui.Button(c.Key("flyout-open-main"), "打开全景指挥台").OnClick(func() {
+		ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
+			ui.Button(c.Key("flyout-open-main"), "打开指挥台").OnClick(func() {
 				s.OpenMissionControl("overview")
 			})
+			if s.LatestRelease != nil && s.LatestRelease.HasUpdate {
+				ui.PrimaryButton(c.Key("flyout-upd"), "🚀 升级 "+s.LatestRelease.TagName).OnClick(func() {
+					s.ShowUpdateModal = true
+					s.OpenMissionControl("overview")
+				})
+			} else {
+				ui.Button(c.Key("flyout-chk-upd"), "v"+model.Version+" · 更新").OnClick(func() {
+					s.ShowUpdateModal = true
+					s.OpenMissionControl("overview")
+					s.CheckForUpdatesAsync()
+				})
+			}
 			ui.Spacer(c)
 			ui.Button(c.Key("flyout-settings"), "设置").OnClick(func() {
 				s.OpenMissionControl("settings")

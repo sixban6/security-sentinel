@@ -140,10 +140,14 @@ type AppState struct {
 	DiscoveredAssetsMap   map[string]model.HostInventory
 
 	// Self-Updater State
-	UpdateChecking bool
-	UpdateApplying bool
-	LatestRelease  *updater.ReleaseInfo
-	UpdateMessage  string
+	UpdateChecking        bool
+	UpdateApplying        bool
+	UpdateProgress        float64
+	LatestRelease         *updater.ReleaseInfo
+	UpdateMessage         string
+	LastUpdateCheckAt     time.Time
+	ShowUpdateModal       bool
+	UpdateBannerDismissed bool
 
 	// Settings & Keychain Vault State
 	OpenAtLogin       bool
@@ -1075,13 +1079,27 @@ func (s *AppState) StartDoctorAsync() {
 	}()
 }
 
-// CheckForUpdatesAsync queries GitHub Releases for a newer prebuilt version.
+// CheckForUpdatesAsync queries GitHub Releases for a newer prebuilt version (interactive user check).
 func (s *AppState) CheckForUpdatesAsync() {
+	s.checkForUpdatesInternal(false)
+}
+
+// CheckForUpdatesSilentAsync quietly checks GitHub Releases in the background without popping error banners if offline.
+func (s *AppState) CheckForUpdatesSilentAsync() {
+	if !s.LastUpdateCheckAt.IsZero() && time.Since(s.LastUpdateCheckAt) < 2*time.Hour {
+		return
+	}
+	s.checkForUpdatesInternal(true)
+}
+
+func (s *AppState) checkForUpdatesInternal(silent bool) {
 	if s.UpdateChecking || s.UpdateApplying {
 		return
 	}
 	s.UpdateChecking = true
-	s.UpdateMessage = "正在从 GitHub Releases 检查最新版本…"
+	if !silent {
+		s.UpdateMessage = "正在从 GitHub Releases 检查最新版本…"
+	}
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
@@ -1089,15 +1107,26 @@ func (s *AppState) CheckForUpdatesAsync() {
 		rel, err := cli.CheckLatest(ctx, model.Version)
 		s.uiSync(func() {
 			s.UpdateChecking = false
+			s.LastUpdateCheckAt = time.Now()
 			if err != nil {
-				s.UpdateMessage = "检查更新提示: " + err.Error()
+				if !silent {
+					s.UpdateMessage = "检查更新提示: " + err.Error()
+					s.StatusBanner = "⚠️ " + s.UpdateMessage
+				}
 				return
 			}
 			s.LatestRelease = &rel
 			if rel.HasUpdate {
-				s.UpdateMessage = fmt.Sprintf("🎉 发现新版本 %s (当前 v%s)，可一键下载升级！", rel.TagName, model.Version)
+				s.UpdateBannerDismissed = false
+				s.UpdateMessage = fmt.Sprintf("🎉 发现新版本 %s (当前 v%s)，可一键下载并原子热更新！", rel.TagName, model.Version)
+				if !silent {
+					s.ShowUpdateModal = true
+				}
 			} else {
 				s.UpdateMessage = fmt.Sprintf("✅ 当前已是最新版本 (v%s)", model.Version)
+				if !silent {
+					s.StatusBanner = fmt.Sprintf("✅ 当前运行的 Security Sentinel v%s 已是最新发布版本！", model.Version)
+				}
 			}
 		})
 	}()
@@ -1110,33 +1139,55 @@ func (s *AppState) ApplySelfUpgradeAsync() {
 	}
 	rel := *s.LatestRelease
 	s.UpdateApplying = true
-	s.UpdateMessage = fmt.Sprintf("正在下载并校验 %s 官方预编译包…", rel.TagName)
+	s.UpdateProgress = 0.15
+	s.UpdateMessage = fmt.Sprintf("1/3 正在拉取 %s SHA-256 校验清单与 CLI 二进制…", rel.TagName)
 
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 		defer cancel()
 		cli := updater.NewClient()
 
-		// Upgrade local CLI (`~/.local/bin/sectl` + `security-sentinel` symlink)
+		// Step 1: Upgrade local CLI (`~/.local/bin/sectl` + `security-sentinel` symlink)
 		cliBin := config.ExpandHome("~/.local/bin/sectl")
 		_, _ = cli.UpgradeCLI(ctx, rel, cliBin)
 
+		s.uiSync(func() {
+			s.UpdateProgress = 0.55
+			if runtime.GOOS == "darwin" {
+				s.UpdateMessage = fmt.Sprintf("2/3 正在下载并原子替换 macOS 原生应用包 (%s)…", rel.TagName)
+			} else {
+				s.UpdateMessage = fmt.Sprintf("2/3 正在下载并原子替换主程序 (%s)…", rel.TagName)
+			}
+		})
+
 		var appErr error
+		var installedApp string
 		if runtime.GOOS == "darwin" {
-			_, appErr = cli.UpgradeMacOSApp(ctx, rel, "")
+			installedApp, appErr = cli.UpgradeMacOSApp(ctx, rel, "")
 		} else {
-			_, appErr = cli.UpgradeCLI(ctx, rel, "")
+			installedApp, appErr = cli.UpgradeCLI(ctx, rel, "")
 		}
 
 		s.uiSync(func() {
-			s.UpdateApplying = false
 			if appErr != nil {
+				s.UpdateApplying = false
+				s.UpdateProgress = 0
 				s.UpdateMessage = "升级未完成: " + appErr.Error()
+				s.StatusBanner = "⚠️ 自动升级未完成: " + appErr.Error()
 				return
 			}
-			s.UpdateMessage = "🎉 升级成功，正在重启进入新版本…"
+			s.UpdateProgress = 1.0
+			s.UpdateMessage = fmt.Sprintf("🎉 3/3 已成功升级至 %s，正在自动重启进入新版本…", rel.TagName)
+			s.StatusBanner = s.UpdateMessage
 			if !s.Headless {
-				mygo.App.Relaunch()
+				if runtime.GOOS == "darwin" && installedApp != "" && strings.HasSuffix(installedApp, ".app") {
+					_ = exec.Command("/bin/sh", "-c", fmt.Sprintf("sleep 0.6 && open %q", installedApp)).Start()
+					mygo.App.Quit()
+				} else {
+					mygo.App.Relaunch()
+				}
+			} else {
+				s.UpdateApplying = false
 			}
 		})
 	}()

@@ -117,10 +117,15 @@ func RunDesktopApp(cfgPath string, openMainImmediately bool) error {
 			s.OpenMissionControl("overview")
 		}
 
-		// Trigger initial gateway status refresh & first background scan if stale
+		// Trigger initial gateway status refresh, silent version check & first background scan if stale
 		if s.Cfg.Gateway.Enabled {
 			s.RefreshHAGatewayAsync()
 		}
+		time.AfterFunc(3*time.Second, func() {
+			if s.Online && !s.MeteredNetwork {
+				s.CheckForUpdatesSilentAsync()
+			}
+		})
 		if _, dueNow, _ := s.NextScheduledScanInfo(time.Now()); dueNow {
 			s.StartAuditAsync(s.AutoFixEnabled, s.AIEnabled)
 		}
@@ -200,7 +205,8 @@ func (s *AppState) buildTrayMenu() *mygo.Menu {
 		{
 			Label: "检查新版本更新…",
 			Click: func(*mygo.MenuItem, *mygo.Window) {
-				s.OpenMissionControl("settings")
+				s.ShowUpdateModal = true
+				s.OpenMissionControl("overview")
 				s.CheckForUpdatesAsync()
 			},
 		},
@@ -262,6 +268,9 @@ func (s *AppState) ToggleFlyout() {
 func (s *AppState) OpenMissionControl(page string) {
 	if page != "" {
 		s.ActivePage = page
+	}
+	if s.Online && !s.MeteredNetwork {
+		s.CheckForUpdatesSilentAsync()
 	}
 	if s.Headless {
 		return

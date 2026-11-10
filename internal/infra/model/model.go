@@ -3,7 +3,7 @@ package model
 import "time"
 
 // Version is stamped via -ldflags during release builds.
-var Version = "2.7.2"
+var Version = "2.7.3"
 
 // Standard 6-state host security statuses (backwards-compatible with v1 labels).
 const (
