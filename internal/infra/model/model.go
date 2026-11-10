@@ -124,6 +124,7 @@ type OrphanedVenv struct {
 type WorkspacePackageFix struct {
 	Package          string   `json:"package" yaml:"package"`
 	Ecosystem        string   `json:"ecosystem" yaml:"ecosystem"`
+	ManifestKind     string   `json:"manifest_kind,omitempty" yaml:"manifest_kind,omitempty"`
 	InstalledVersion string   `json:"installed_version" yaml:"installed_version"`
 	FixedVersion     string   `json:"fixed_version" yaml:"fixed_version"`
 	Severity         string   `json:"severity" yaml:"severity"`

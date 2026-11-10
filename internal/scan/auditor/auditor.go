@@ -3,6 +3,7 @@ package auditor
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -464,8 +465,9 @@ func buildWorkspaceProjectAudits(hits []wsRawHit) []model.WorkspaceProjectAudit 
 	}
 
 	type projAccum struct {
-		proj model.WorkspaceProjectAudit
-		pkgs map[string]*model.WorkspacePackageFix
+		proj          model.WorkspaceProjectAudit
+		pkgs          map[string]*model.WorkspacePackageFix
+		manifestKinds map[string]bool
 	}
 	byProj := make(map[string]*projAccum)
 
@@ -494,15 +496,20 @@ func buildWorkspaceProjectAudits(hits []wsRawHit) []model.WorkspaceProjectAudit 
 				proj: model.WorkspaceProjectAudit{
 					ProjectName:    projName,
 					ProjectDir:     projDir,
-					ManifestKind:   mKind,
 					LastActiveDays: a.LastActiveDays,
 					ModifiedUnix:   a.ModifiedUnix,
 					CreatedUnix:    a.CreatedUnix,
 					Archived:       a.Archived,
 				},
-				pkgs: make(map[string]*model.WorkspacePackageFix),
+				pkgs:          make(map[string]*model.WorkspacePackageFix),
+				manifestKinds: make(map[string]bool),
 			}
 			byProj[projDir] = acc
+		}
+
+		resolvedKind := resolvePackageManifestKind(mKind, a.Ecosystem, projDir)
+		if resolvedKind != "" {
+			acc.manifestKinds[resolvedKind] = true
 		}
 
 		pkgKey := strings.ToLower(a.Name)
@@ -511,11 +518,14 @@ func buildWorkspaceProjectAudits(hits []wsRawHit) []model.WorkspaceProjectAudit 
 			pf = &model.WorkspacePackageFix{
 				Package:          a.Name,
 				Ecosystem:        a.Ecosystem,
+				ManifestKind:     resolvedKind,
 				InstalledVersion: a.Version,
 				Severity:         adv.Severity,
 				Summary:          adv.Summary,
 			}
 			acc.pkgs[pkgKey] = pf
+		} else if pf.ManifestKind == "" && resolvedKind != "" {
+			pf.ManifestKind = resolvedKind
 		}
 
 		// Merge CVE IDs
@@ -560,9 +570,24 @@ func buildWorkspaceProjectAudits(hits []wsRawHit) []model.WorkspaceProjectAudit 
 
 	var out []model.WorkspaceProjectAudit
 	for _, acc := range byProj {
+		// Calculate project's combined ManifestKind (e.g. "gomod+venv" or "gomod")
+		var kinds []string
+		for k := range acc.manifestKinds {
+			kinds = append(kinds, k)
+		}
+		sort.Strings(kinds)
+		if len(kinds) > 0 {
+			acc.proj.ManifestKind = strings.Join(kinds, "+")
+		}
+
 		for _, pf := range acc.pkgs {
 			sort.Strings(pf.CVEIDs)
-			pf.UpgradeCmd = BuildPackageUpgradeCmd(acc.proj.ManifestKind, acc.proj.ProjectDir, pf.Package, pf.FixedVersion)
+			pkgKind := pf.ManifestKind
+			if pkgKind == "" {
+				pkgKind = resolvePackageManifestKind(acc.proj.ManifestKind, pf.Ecosystem, acc.proj.ProjectDir)
+				pf.ManifestKind = pkgKind
+			}
+			pf.UpgradeCmd = BuildPackageUpgradeCmd(pkgKind, acc.proj.ProjectDir, pf.Package, pf.FixedVersion)
 			acc.proj.Packages = append(acc.proj.Packages, *pf)
 		}
 		sort.Slice(acc.proj.Packages, func(i, j int) bool {
@@ -638,8 +663,108 @@ func AuditSingleWorkspaceProject(ctx context.Context, assets []model.AssetItem, 
 	return &projs[0]
 }
 
+// resolvePackageManifestKind returns the guaranteed correct package manifest type for a given package,
+// preventing multi-stack / hybrid projects (such as Go desktop apps containing a Python worker in .venv)
+// from confusing tools like `go get` with Python packages.
+func resolvePackageManifestKind(mKind, ecosystem, projectDir string) string {
+	switch ecosystem {
+	case model.EcoGo:
+		return "gomod"
+	case model.EcoPyPI:
+		if mKind == "uv" || mKind == "poetry" || mKind == "venv" || mKind == "global-pip" {
+			return mKind
+		}
+		if projectDir == "global-pip" {
+			return "global-pip"
+		}
+		if projectDir != "" {
+			if _, err := os.Stat(filepath.Join(projectDir, "uv.lock")); err == nil {
+				return "uv"
+			}
+			if _, err := os.Stat(filepath.Join(projectDir, "poetry.lock")); err == nil {
+				return "poetry"
+			}
+		}
+		return "venv"
+	case model.EcoNPM:
+		if mKind == "npm" || mKind == "pnpm" || mKind == "yarn" {
+			return mKind
+		}
+		if projectDir != "" {
+			if _, err := os.Stat(filepath.Join(projectDir, "pnpm-lock.yaml")); err == nil {
+				return "pnpm"
+			}
+			if _, err := os.Stat(filepath.Join(projectDir, "yarn.lock")); err == nil {
+				return "yarn"
+			}
+		}
+		return "npm"
+	case model.EcoCrates:
+		return "cargo"
+	case model.EcoMaven:
+		if mKind == "maven" || mKind == "gradle" {
+			return mKind
+		}
+		if projectDir != "" {
+			if _, err := os.Stat(filepath.Join(projectDir, "build.gradle")); err == nil {
+				return "gradle"
+			}
+			if _, err := os.Stat(filepath.Join(projectDir, "build.gradle.kts")); err == nil {
+				return "gradle"
+			}
+		}
+		return "maven"
+	case model.EcoPackagist:
+		return "composer"
+	case model.EcoRubyGems:
+		return "bundler"
+	case model.EcoNuGet:
+		return "nuget"
+	case model.EcoSwift:
+		return "swift"
+	default:
+		if mKind != "" {
+			return mKind
+		}
+		return ""
+	}
+}
+
 // BuildPackageUpgradeCmd builds the exact non-destructive CLI command to upgrade a single project dependency.
 func BuildPackageUpgradeCmd(manifestKind, projectDir, pkg, fixedVer string) string {
+	// Guard against composite manifestKind (e.g. "gomod+venv")
+	if strings.Contains(manifestKind, "+") {
+		if strings.Contains(pkg, "/") && strings.Contains(manifestKind, "gomod") {
+			manifestKind = "gomod"
+		} else if strings.Contains(manifestKind, "venv") {
+			manifestKind = "venv"
+		} else if strings.Contains(manifestKind, "uv") {
+			manifestKind = "uv"
+		} else if strings.Contains(manifestKind, "npm") {
+			manifestKind = "npm"
+		} else {
+			parts := strings.Split(manifestKind, "+")
+			manifestKind = parts[0]
+		}
+	}
+
+	// Safety Guard: A Go module path in go.mod always contains a domain dot or slash (e.g. "golang.org/x/net").
+	// Plain package names (like "pillow", "urllib3", "requests", "express") can NEVER be upgraded by "go get".
+	// If misclassified as gomod, auto-resolve to venv/npm if present in projectDir!
+	if manifestKind == "gomod" && !strings.Contains(pkg, "/") && !strings.Contains(pkg, ".") {
+		if projectDir != "" {
+			if _, err := os.Stat(filepath.Join(projectDir, ".venv")); err == nil {
+				manifestKind = "venv"
+			} else if _, err := os.Stat(filepath.Join(projectDir, "venv")); err == nil {
+				manifestKind = "venv"
+			} else if _, err := os.Stat(filepath.Join(projectDir, "uv.lock")); err == nil {
+				manifestKind = "uv"
+			} else if _, err := os.Stat(filepath.Join(projectDir, "package.json")); err == nil {
+				manifestKind = "npm"
+			}
+		}
+	}
+
 	switch manifestKind {
 	case "uv":
 		return fmt.Sprintf("uv lock --upgrade-package %s && uv sync", pkg)
@@ -683,17 +808,60 @@ func BuildPackageUpgradeCmd(manifestKind, projectDir, pkg, fixedVer string) stri
 }
 
 // BuildProjectBatchUpgradeCmd builds a single fast batch command to upgrade all vulnerable packages in one project.
+// In hybrid / multi-stack projects (e.g. Go backend + Python .venv worker, or Node + Go), packages are
+// grouped by their own manifest kind so each tool (go get, uv pip, npm, etc.) runs cleanly without cross-contaminating!
 func BuildProjectBatchUpgradeCmd(proj model.WorkspaceProjectAudit) string {
 	if len(proj.Packages) == 0 {
 		return ""
 	}
+
+	pkgsByKind := make(map[string][]model.WorkspacePackageFix)
+	for _, p := range proj.Packages {
+		k := p.ManifestKind
+		if k == "" {
+			k = resolvePackageManifestKind(proj.ManifestKind, p.Ecosystem, proj.ProjectDir)
+		}
+		if k == "" {
+			k = proj.ManifestKind
+		}
+		pkgsByKind[k] = append(pkgsByKind[k], p)
+	}
+
+	var kinds []string
+	for k := range pkgsByKind {
+		kinds = append(kinds, k)
+	}
+	sort.Slice(kinds, func(i, j int) bool {
+		if kinds[i] == "gomod" {
+			return true
+		}
+		if kinds[j] == "gomod" {
+			return false
+		}
+		return kinds[i] < kinds[j]
+	})
+
+	var subCmds []string
+	for _, k := range kinds {
+		cmd := buildManifestBatchUpgradeCmd(k, proj.ProjectDir, pkgsByKind[k])
+		if cmd != "" {
+			subCmds = append(subCmds, cmd)
+		}
+	}
+	return strings.Join(subCmds, " && ")
+}
+
+func buildManifestBatchUpgradeCmd(manifestKind, projectDir string, pkgs []model.WorkspacePackageFix) string {
+	if len(pkgs) == 0 {
+		return ""
+	}
 	var names []string
 	var quotedNames []string
-	for _, p := range proj.Packages {
+	for _, p := range pkgs {
 		names = append(names, p.Package)
 		quotedNames = append(quotedNames, fmt.Sprintf("%q", p.Package))
 	}
-	switch proj.ManifestKind {
+	switch manifestKind {
 	case "uv":
 		var flags []string
 		for _, n := range names {
@@ -710,6 +878,8 @@ func BuildProjectBatchUpgradeCmd(proj model.WorkspaceProjectAudit) string {
 		return "npm update " + strings.Join(names, " ")
 	case "pnpm":
 		return "pnpm up " + strings.Join(names, " ")
+	case "yarn":
+		return "yarn upgrade " + strings.Join(names, " ")
 	case "cargo":
 		var flags []string
 		for _, n := range names {
@@ -718,7 +888,7 @@ func BuildProjectBatchUpgradeCmd(proj model.WorkspaceProjectAudit) string {
 		return "cargo update " + strings.Join(flags, " ")
 	case "gomod":
 		var gets []string
-		for _, p := range proj.Packages {
+		for _, p := range pkgs {
 			verSpec := "latest"
 			if p.FixedVersion != "" {
 				verSpec = "v" + strings.TrimPrefix(p.FixedVersion, "v")
@@ -726,10 +896,18 @@ func BuildProjectBatchUpgradeCmd(proj model.WorkspaceProjectAudit) string {
 			gets = append(gets, fmt.Sprintf("(go get %s@%s || go get -u %s)", p.Package, verSpec, p.Package))
 		}
 		return strings.Join(gets, " && ") + " && go mod tidy"
+	case "composer":
+		return "composer update " + strings.Join(names, " ") + " --with-all-dependencies"
+	case "bundler":
+		return "bundle update " + strings.Join(names, " ")
 	default:
 		var cmds []string
-		for _, p := range proj.Packages {
-			cmds = append(cmds, p.UpgradeCmd)
+		for _, p := range pkgs {
+			if p.UpgradeCmd != "" {
+				cmds = append(cmds, p.UpgradeCmd)
+			} else {
+				cmds = append(cmds, BuildPackageUpgradeCmd(manifestKind, projectDir, p.Package, p.FixedVersion))
+			}
 		}
 		return strings.Join(cmds, " && ")
 	}

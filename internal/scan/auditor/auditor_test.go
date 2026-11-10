@@ -2,6 +2,9 @@ package auditor
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/sixban6/security-sentinel/internal/infra/model"
@@ -107,5 +110,125 @@ func TestAuditSeparatesHostRuntimeFromAggregatedWorkspaceProjects(t *testing.T) 
 
 	if len(rep.Hosts[1].RetirableMitigations) != 1 || rep.Hosts[1].RetirableMitigations[0] != "CVE-2025-20002" {
 		t.Fatalf("expected CVE-2025-20002 workaround to be flagged as retirable, got %+v", rep.Hosts[1])
+	}
+}
+
+func TestAuditHybridWorkspaceProjectGoAndPythonVenv(t *testing.T) {
+	projDir := t.TempDir()
+
+	hits := []wsRawHit{
+		{
+			asset: model.AssetItem{
+				Ecosystem:    model.EcoGo,
+				Name:         "golang.org/x/net",
+				Version:      "0.59.0",
+				Location:     projDir + "/go.mod",
+				Kind:         "lockfile",
+				ProjectName:  "hybrid-app",
+				ProjectDir:   projDir,
+				ManifestKind: "gomod",
+			},
+			adv: model.Advisory{
+				ID:        "GHSA-1111",
+				Severity:  "HIGH",
+				FixedIn:   []string{"0.62.0"},
+				Summary:   "Go net vuln",
+				Ecosystem: model.EcoGo,
+			},
+		},
+		{
+			asset: model.AssetItem{
+				Ecosystem:    model.EcoPyPI,
+				Name:         "pillow",
+				Version:      "12.3.0",
+				Location:     projDir + "/.venv/lib/python3.12/site-packages",
+				Kind:         "venv",
+				ProjectName:  "hybrid-app",
+				ProjectDir:   projDir,
+				ManifestKind: "venv",
+			},
+			adv: model.Advisory{
+				ID:        "CVE-2026-97687",
+				Severity:  "CRITICAL",
+				FixedIn:   []string{"13.0.0"},
+				Summary:   "Pillow buffer overflow",
+				Ecosystem: model.EcoPyPI,
+			},
+		},
+	}
+
+	projs := buildWorkspaceProjectAudits(hits)
+	if len(projs) != 1 {
+		t.Fatalf("expected 1 hybrid project audit, got %d", len(projs))
+	}
+
+	p := projs[0]
+	if p.ManifestKind != "gomod+venv" {
+		t.Errorf("expected ManifestKind 'gomod+venv', got %q", p.ManifestKind)
+	}
+	if len(p.Packages) != 2 {
+		t.Fatalf("expected 2 packages, got %d", len(p.Packages))
+	}
+
+	var goFix, pyFix *model.WorkspacePackageFix
+	for i := range p.Packages {
+		if p.Packages[i].Package == "golang.org/x/net" {
+			goFix = &p.Packages[i]
+		}
+		if p.Packages[i].Package == "pillow" {
+			pyFix = &p.Packages[i]
+		}
+	}
+
+	if goFix == nil || pyFix == nil {
+		t.Fatalf("expected both Go and Python package fixes, got %+v", p.Packages)
+	}
+
+	// Verify Go package fix
+	if goFix.ManifestKind != "gomod" {
+		t.Errorf("expected Go fix ManifestKind 'gomod', got %q", goFix.ManifestKind)
+	}
+	if !strings.Contains(goFix.UpgradeCmd, "go get golang.org/x/net@v0.62.0") {
+		t.Errorf("expected Go fix UpgradeCmd to contain go get, got %q", goFix.UpgradeCmd)
+	}
+
+	// Verify Python package fix: MUST NOT use go get!
+	if pyFix.ManifestKind != "venv" {
+		t.Errorf("expected Python fix ManifestKind 'venv', got %q", pyFix.ManifestKind)
+	}
+	if strings.Contains(pyFix.UpgradeCmd, "go get") {
+		t.Errorf("FATAL: Python package pillow was assigned go get command: %q", pyFix.UpgradeCmd)
+	}
+	if !strings.Contains(pyFix.UpgradeCmd, "uv pip install") {
+		t.Errorf("expected Python fix UpgradeCmd to use uv pip / python venv upgrade, got %q", pyFix.UpgradeCmd)
+	}
+
+	// Verify Batch Upgrade Command: MUST NOT run "go get pillow"
+	batchCmd := BuildProjectBatchUpgradeCmd(p)
+	if strings.Contains(batchCmd, "go get pillow") {
+		t.Errorf("FATAL: batch command contains 'go get pillow': %q", batchCmd)
+	}
+	if !strings.Contains(batchCmd, "go get golang.org/x/net") {
+		t.Errorf("expected batch command to contain Go upgrade: %q", batchCmd)
+	}
+	if !strings.Contains(batchCmd, "uv pip install") {
+		t.Errorf("expected batch command to contain uv pip upgrade: %q", batchCmd)
+	}
+}
+
+func TestBuildPackageUpgradeCmdSafetyGuard(t *testing.T) {
+	tmp := t.TempDir()
+	// Fake a .venv in tmp
+	if err := os.Mkdir(filepath.Join(tmp, ".venv"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Direct call with mistaken "gomod" manifestKind for "pillow"
+	cmd := BuildPackageUpgradeCmd("gomod", tmp, "pillow", "13.0.0")
+	if strings.Contains(cmd, "go get pillow") {
+		t.Fatalf("safety guard failed: BuildPackageUpgradeCmd produced go get for Python package: %q", cmd)
+	}
+	if !strings.Contains(cmd, "uv pip install") {
+		t.Fatalf("expected safety guard to fallback to Python venv upgrade, got %q", cmd)
 	}
 }

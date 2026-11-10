@@ -801,7 +801,7 @@ func (s *AppState) runAndVerifySingleProjectUpgrade(
 ) (statusNote string, remaining *model.WorkspaceProjectAudit) {
 	var outBytes []byte
 	var cmdErr error
-	if (manifestKind == "maven" || manifestKind == "gradle") && len(existingFixes) > 0 {
+	if (strings.Contains(manifestKind, "maven") || strings.Contains(manifestKind, "gradle")) && len(existingFixes) > 0 {
 		updatedFiles, jErr := lockfile.UpgradeJavaProjectFiles(projectDir, existingFixes)
 		if jErr != nil || updatedFiles == 0 {
 			shCmd := exec.CommandContext(ctx, "/bin/sh", "-c", cmdStr)
