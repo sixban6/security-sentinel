@@ -8,6 +8,7 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/sixban6/security-sentinel/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/sixban6/security-sentinel/actions/workflows/ci.yml)
 [![Go](https://img.shields.io/badge/Pure_Go-CGO__ENABLED%3D0-00ADD8?style=flat-square&logo=go&logoColor=white)](https://go.dev/)
 [![MyGo Native UI](https://img.shields.io/badge/Desktop_GUI-MyGo_Native_GPU-8b5cf6?style=flat-square)](https://github.com/egoist/mygo)
+[![Listed on Awesome MyGo](https://awesomemygo.dev/badge.svg)](https://awesomemygo.dev/apps/security-sentinel)
 [![Platform](https://img.shields.io/badge/Platform-macOS_%7C_Linux_%7C_Windows_%7C_OpenWrt-f59e0b?style=flat-square)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-3b82f6?style=flat-square)](LICENSE)
 
