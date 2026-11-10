@@ -2,10 +2,12 @@ package auditor
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -588,6 +590,7 @@ func buildWorkspaceProjectAudits(hits []wsRawHit) []model.WorkspaceProjectAudit 
 				pf.ManifestKind = pkgKind
 			}
 			pf.UpgradeCmd = BuildPackageUpgradeCmd(pkgKind, acc.proj.ProjectDir, pf.Package, pf.FixedVersion)
+			populatePackageUpgradeDiagnostics(pf, acc.proj.ProjectDir)
 			acc.proj.Packages = append(acc.proj.Packages, *pf)
 		}
 		sort.Slice(acc.proj.Packages, func(i, j int) bool {
@@ -925,6 +928,283 @@ func buildSmartPythonVenvUpgradeCmd(quotedPkgs []string) string {
 			`else "$PY" -m ensurepip >/dev/null 2>&1 && "$PY" -m pip install -q -U %s; fi`,
 		pkgList, pkgList, pkgList,
 	)
+}
+
+func parseSemverMajor(ver string) (int, bool) {
+	v := strings.TrimSpace(ver)
+	v = strings.TrimPrefix(strings.TrimPrefix(v, "v"), "V")
+	if v == "" {
+		return 0, false
+	}
+	dotIdx := strings.IndexAny(v, ".-+")
+	head := v
+	if dotIdx >= 0 {
+		head = v[:dotIdx]
+	}
+	n, err := strconv.Atoi(head)
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	return n, true
+}
+
+func isMajorVersionUpgrade(manifestKind, installedVer, fixedVer string) (isMajor bool, instMajor, fixMajor int) {
+	if installedVer == "" || fixedVer == "" {
+		return false, 0, 0
+	}
+	// Unconstrained pip/uv venv installs (`pip install -U`) automatically cross major versions without SemVer `^` lock
+	if manifestKind == "venv" || manifestKind == "global-pip" {
+		return false, 0, 0
+	}
+	im, ok1 := parseSemverMajor(installedVer)
+	fm, ok2 := parseSemverMajor(fixedVer)
+	if !ok1 || !ok2 {
+		return false, 0, 0
+	}
+	if manifestKind == "gomod" {
+		// In Go modules, v0 -> v1 uses the same import path; v2+ requires module path suffix changes (e.g. /v2, /v5)
+		if fm > im && fm >= 2 {
+			return true, im, fm
+		}
+		return false, im, fm
+	}
+	if fm > im && fm >= 1 {
+		return true, im, fm
+	}
+	return false, im, fm
+}
+
+func isPackageTransitiveInProject(projectDir, manifestKind, pkgName string) bool {
+	if projectDir == "" || projectDir == "global-pip" || pkgName == "" {
+		return false
+	}
+	switch manifestKind {
+	case "npm", "pnpm", "yarn":
+		data, err := os.ReadFile(filepath.Join(projectDir, "package.json"))
+		if err != nil {
+			return false
+		}
+		var doc struct {
+			Dependencies         map[string]any `json:"dependencies"`
+			DevDependencies      map[string]any `json:"devDependencies"`
+			PeerDependencies     map[string]any `json:"peerDependencies"`
+			OptionalDependencies map[string]any `json:"optionalDependencies"`
+		}
+		if err := json.Unmarshal(data, &doc); err != nil {
+			return false
+		}
+		if _, ok := doc.Dependencies[pkgName]; ok {
+			return false
+		}
+		if _, ok := doc.DevDependencies[pkgName]; ok {
+			return false
+		}
+		if _, ok := doc.PeerDependencies[pkgName]; ok {
+			return false
+		}
+		if _, ok := doc.OptionalDependencies[pkgName]; ok {
+			return false
+		}
+		return true
+
+	case "gomod":
+		data, err := os.ReadFile(filepath.Join(projectDir, "go.mod"))
+		if err != nil {
+			return false
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "//") || trimmed == "" {
+				continue
+			}
+			trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, "require "))
+			fields := strings.Fields(trimmed)
+			if len(fields) >= 2 && fields[0] == pkgName {
+				return strings.Contains(line, "// indirect")
+			}
+		}
+		return true
+
+	case "uv", "poetry":
+		data, err := os.ReadFile(filepath.Join(projectDir, "pyproject.toml"))
+		if err != nil {
+			return false
+		}
+		normPkg := strings.ToLower(strings.ReplaceAll(pkgName, "_", "-"))
+		normDoc := strings.ToLower(strings.ReplaceAll(string(data), "_", "-"))
+		return !strings.Contains(normDoc, normPkg)
+
+	case "cargo":
+		data, err := os.ReadFile(filepath.Join(projectDir, "Cargo.toml"))
+		if err != nil {
+			return false
+		}
+		normPkg := strings.ToLower(strings.ReplaceAll(pkgName, "_", "-"))
+		normDoc := strings.ToLower(strings.ReplaceAll(string(data), "_", "-"))
+		return !strings.Contains(normDoc, normPkg)
+	}
+	return false
+}
+
+func populatePackageUpgradeDiagnostics(pf *model.WorkspacePackageFix, projectDir string) {
+	if pf == nil {
+		return
+	}
+	isMaj, instMaj, fixMaj := isMajorVersionUpgrade(pf.ManifestKind, pf.InstalledVersion, pf.FixedVersion)
+	isTrans := isPackageTransitiveInProject(projectDir, pf.ManifestKind, pf.Package)
+	pf.MajorUpgrade = isMaj
+	pf.Transitive = isTrans
+
+	switch {
+	case pf.FixedVersion == "":
+		pf.UpgradeHint = "官方未出补丁"
+	case pf.ManifestKind == "gomod" && isMaj && fixMaj >= 2:
+		if isTrans {
+			pf.UpgradeHint = fmt.Sprintf("间接依赖·跨v%d➔v%d", instMaj, fixMaj)
+		} else {
+			pf.UpgradeHint = fmt.Sprintf("跨v%d➔v%d·需改import路径", instMaj, fixMaj)
+		}
+	case isMaj && isTrans:
+		pf.UpgradeHint = fmt.Sprintf("间接依赖·跨v%d➔v%d", instMaj, fixMaj)
+	case isMaj:
+		pf.UpgradeHint = fmt.Sprintf("需跨大版本 v%d➔v%d", instMaj, fixMaj)
+	case isTrans:
+		pf.UpgradeHint = "间接依赖"
+	}
+}
+
+func formatDiagPkgList(items []string, limit int) string {
+	if len(items) == 0 {
+		return ""
+	}
+	if len(items) <= limit {
+		return strings.Join(items, ", ")
+	}
+	return fmt.Sprintf("%s 等 %d 个包", strings.Join(items[:limit], ", "), len(items))
+}
+
+// DiagnoseWorkspaceUpgradeOutcome analyzes pre/post upgrade package states, manifest constraints, and command output
+// to provide a concrete, human-friendly explanation when some or all packages remain vulnerable after 1-click upgrade.
+func DiagnoseWorkspaceUpgradeOutcome(
+	projectDir, manifestKind string,
+	prevPkgCount int,
+	remPkgs []model.WorkspacePackageFix,
+	outBytes []byte,
+	cmdErr error,
+) string {
+	remCount := len(remPkgs)
+	if remCount == 0 {
+		return "closed"
+	}
+
+	outStr := string(outBytes)
+	conflictNote := ""
+	switch {
+	case strings.Contains(outStr, "ERESOLVE") || strings.Contains(outStr, "Conflicting peer dependency") || strings.Contains(outStr, "peer dep"):
+		conflictNote = "依赖树版本冲突 (ERESOLVE peer dependency)"
+	case strings.Contains(outStr, "ResolutionImpossible") || strings.Contains(outStr, "NoSolutionFound") || strings.Contains(outStr, "version solving failed"):
+		conflictNote = "Python 依赖解析器检测到版本上下限冲突"
+	case strings.Contains(outStr, "module path must match major version") || strings.Contains(outStr, "invalid version"):
+		conflictNote = "Go v2+ 大版本要求模块路径带 /vN 后缀"
+	case strings.Contains(outStr, "requires go >="):
+		conflictNote = "目标安全版本要求的 Go 版本高于当前 go.mod"
+	case strings.Contains(outStr, "ETIMEDOUT") || strings.Contains(outStr, "ECONNRESET") || strings.Contains(outStr, "EAI_AGAIN") || strings.Contains(outStr, "TLS handshake timeout") || strings.Contains(outStr, "dial tcp"):
+		conflictNote = "包管理器连接生态镜像源超时或网络不可达"
+	}
+
+	var unfixedList []string
+	var majorDirectList []string
+	var majorTransList []string
+	var transList []string
+	var constrainedList []string
+
+	for i := range remPkgs {
+		p := remPkgs[i]
+		if p.UpgradeHint == "" && !p.MajorUpgrade && !p.Transitive {
+			populatePackageUpgradeDiagnostics(&p, projectDir)
+		}
+		label := p.Package
+		if p.FixedVersion != "" {
+			label = fmt.Sprintf("%s(%s➔%s)", p.Package, p.InstalledVersion, p.FixedVersion)
+		} else {
+			label = fmt.Sprintf("%s(%s)", p.Package, p.InstalledVersion)
+		}
+
+		switch {
+		case p.FixedVersion == "":
+			unfixedList = append(unfixedList, label)
+		case p.MajorUpgrade && p.Transitive:
+			majorTransList = append(majorTransList, label)
+		case p.MajorUpgrade:
+			majorDirectList = append(majorDirectList, label)
+		case p.Transitive:
+			transList = append(transList, label)
+		default:
+			constrainedList = append(constrainedList, label)
+		}
+	}
+
+	var reasons []string
+	if conflictNote != "" {
+		reasons = append(reasons, conflictNote)
+	}
+	if len(majorDirectList) > 0 {
+		reasons = append(reasons, fmt.Sprintf("[需跨大版本] %s", formatDiagPkgList(majorDirectList, 2)))
+	}
+	if len(majorTransList) > 0 {
+		reasons = append(reasons, fmt.Sprintf("[间接依赖·跨大版本被锁死] %s", formatDiagPkgList(majorTransList, 2)))
+	}
+	if len(transList) > 0 {
+		reasons = append(reasons, fmt.Sprintf("[间接子依赖被上层包锁死] %s", formatDiagPkgList(transList, 2)))
+	}
+	if len(unfixedList) > 0 {
+		reasons = append(reasons, fmt.Sprintf("[官方尚未发布修复补丁] %s", formatDiagPkgList(unfixedList, 2)))
+	}
+	if len(constrainedList) > 0 {
+		reasons = append(reasons, fmt.Sprintf("[受项目版本上限约束] %s", formatDiagPkgList(constrainedList, 2)))
+	}
+
+	var actionTip string
+	switch {
+	case len(unfixedList) == remCount:
+		actionTip = "建议点击「暂缓 30 天」或豁免等待官方发版"
+	case strings.Contains(manifestKind, "npm") || strings.Contains(manifestKind, "pnpm") || strings.Contains(manifestKind, "yarn"):
+		if len(majorTransList) > 0 || len(transList) > 0 {
+			actionTip = "需在 package.json 配置 overrides 强制覆盖子依赖，或升级顶层包"
+		} else if len(majorDirectList) > 0 {
+			actionTip = "默认 update 不跨主版本，请修改 package.json 版本范围后执行 npm i"
+		}
+	case strings.Contains(manifestKind, "gomod"):
+		if len(majorDirectList) > 0 || len(majorTransList) > 0 {
+			actionTip = "Go v2+ 需修改 import 路径后缀 (如 /v5) 或升级上层依赖"
+		}
+	case strings.Contains(manifestKind, "uv") || strings.Contains(manifestKind, "poetry") || strings.Contains(manifestKind, "venv"):
+		if len(majorDirectList) > 0 || len(majorTransList) > 0 || len(transList) > 0 || len(constrainedList) > 0 {
+			actionTip = "请放宽 pyproject.toml 版本上限约束或升级锁定它的上层包"
+		}
+	}
+
+	detail := strings.Join(reasons, "；")
+	if actionTip != "" {
+		detail += " — " + actionTip
+	}
+
+	if prevPkgCount > remCount {
+		return fmt.Sprintf("partial:已成功升级修复 %d 个包！剩余 %d 项未升：%s", prevPkgCount-remCount, remCount, detail)
+	}
+	if cmdErr != nil && conflictNote == "" {
+		tail := strings.TrimSpace(outStr)
+		if lines := strings.Split(tail, "\n"); len(lines) > 0 {
+			tail = strings.TrimSpace(lines[len(lines)-1])
+		}
+		if len(tail) > 75 {
+			tail = tail[:75] + "..."
+		}
+		if tail != "" {
+			return fmt.Sprintf("warn:命令返回报错 (%s)，剩余 %d 项：%s", tail, remCount, detail)
+		}
+	}
+	return fmt.Sprintf("warn:未自动闭环 (共 %d 项)：%s", remCount, detail)
 }
 
 func computeHostScore(unmitigated []model.VulnerabilityMatch, rebootReq bool) int {

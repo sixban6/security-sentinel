@@ -827,21 +827,7 @@ func (s *AppState) runAndVerifySingleProjectUpgrade(
 		return "closed", nil
 	}
 
-	remCount := len(refreshed.Packages)
-	if cmdErr != nil {
-		tail := strings.TrimSpace(string(outBytes))
-		if lines := strings.Split(tail, "\n"); len(lines) > 0 {
-			tail = strings.TrimSpace(lines[len(lines)-1])
-		}
-		if len(tail) > 90 {
-			tail = tail[:90] + "..."
-		}
-		return fmt.Sprintf("warn:命令返回提示 (%s)，剩余 %d 个包受版本约束待手动处理", tail, remCount), refreshed
-	}
-	if prevPkgCount > remCount {
-		return fmt.Sprintf("partial:已成功升级修复 %d 个包！剩余 %d 个包受项目版本上限约束需手动调整", prevPkgCount-remCount, remCount), refreshed
-	}
-	return fmt.Sprintf("warn:当前生态源最高兼容版本仍存在 %d 个上游未修复项或受限于版本约束", remCount), refreshed
+	return auditor.DiagnoseWorkspaceUpgradeOutcome(projectDir, manifestKind, prevPkgCount, refreshed.Packages, outBytes, cmdErr), refreshed
 }
 
 func (s *AppState) applySingleProjectUpgradeOutcome(

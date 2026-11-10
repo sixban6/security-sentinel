@@ -309,13 +309,24 @@ func (s *AppState) renderWorkspacePage(c *ui.Context) {
 										verArrow = fmt.Sprintf("%s ➔ %s", pf.InstalledVersion, pf.FixedVersion)
 									}
 									ui.Text(c, fmt.Sprintf("%s (%s)", pf.Package, verArrow)).FontSize(13).Bold()
+									if pf.UpgradeHint != "" {
+										hintColor := ui.Hex("#6366f1")
+										if pf.FixedVersion == "" {
+											hintColor = ui.Hex("#64748b")
+										} else if pf.MajorUpgrade {
+											hintColor = ui.Hex("#d97706")
+										}
+										ui.Badge(c, pf.UpgradeHint).Background(hintColor.Alpha(0.15)).TextColor(hintColor)
+									}
 									cvePreview := strings.Join(pf.CVEIDs, ", ")
 									if len(pf.CVEIDs) > 3 {
 										cvePreview = fmt.Sprintf("%s 等 %d 个 CVE", strings.Join(pf.CVEIDs[:2], ", "), len(pf.CVEIDs))
 									}
 									ui.Text(c, cvePreview).FontSize(11).TextColor(t.TextMuted).Grow(1).SingleLine()
 
-									if !strings.HasPrefix(pf.UpgradeCmd, "#") {
+									if pf.FixedVersion == "" {
+										ui.Button(c.Key(rowKey+"-up"), "暂无补丁").Disabled(true)
+									} else if !strings.HasPrefix(pf.UpgradeCmd, "#") {
 										pkgBtnLbl := "升级此包"
 										if isRunning {
 											pkgBtnLbl = "升级中…"

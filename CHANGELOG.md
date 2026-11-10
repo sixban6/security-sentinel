@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.7.2] - 2026-11-10
+
+### Features & Bug Fixes
+
+* **workspace-diagnostics:** replace generic upgrade warning banner with fine-grained root-cause classification (`DiagnoseWorkspaceUpgradeOutcome`). Accurately distinguish 5 failure modes: (1) Major-version SemVer boundary locks (`需跨大版本 v2➔v4`), (2) Transitive sub-dependencies locked by parent packages (`间接依赖·跨大版本被锁死`), (3) Peer dependency / solver conflicts masked by `||` fallbacks (`ERESOLVE` / `ResolutionImpossible` / Go v2+ import path mismatch), (4) Unfixed upstream 0-day advisories (`官方未出补丁`), and (5) Registry/network timeouts, providing ecosystem-specific remediation advice (`package.json` `overrides`, Go `/vN` import paths, `pyproject.toml` constraints).
+* **workspace-ui-prehints:** display pre-upgrade diagnostic badges (`需跨大版本`, `间接依赖`, `官方未出补丁`) directly on project dependency cards in both GUI and CLI (`sectl ws`), and disable the single-package upgrade button (`暂无补丁`) when no upstream fix version exists yet.
+
 ## [2.7.1] - 2026-11-10
 
 ### Bug Fixes

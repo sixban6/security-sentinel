@@ -3,7 +3,7 @@ package model
 import "time"
 
 // Version is stamped via -ldflags during release builds.
-var Version = "2.7.1"
+var Version = "2.7.2"
 
 // Standard 6-state host security statuses (backwards-compatible with v1 labels).
 const (
@@ -131,6 +131,9 @@ type WorkspacePackageFix struct {
 	CVEIDs           []string `json:"cve_ids" yaml:"cve_ids"`
 	Summary          string   `json:"summary" yaml:"summary"`
 	UpgradeCmd       string   `json:"upgrade_cmd" yaml:"upgrade_cmd"`
+	MajorUpgrade     bool     `json:"major_upgrade,omitempty" yaml:"major_upgrade,omitempty"`
+	Transitive       bool     `json:"transitive,omitempty" yaml:"transitive,omitempty"`
+	UpgradeHint      string   `json:"upgrade_hint,omitempty" yaml:"upgrade_hint,omitempty"`
 }
 
 // WorkspaceProjectAudit groups dependency upgrades by developer project, separated from host runtime security.

@@ -232,3 +232,65 @@ func TestBuildPackageUpgradeCmdSafetyGuard(t *testing.T) {
 		t.Fatalf("expected safety guard to fallback to Python venv upgrade, got %q", cmd)
 	}
 }
+
+func TestDiagnoseWorkspaceUpgradeOutcomeAndPreHints(t *testing.T) {
+	projDir := t.TempDir()
+	pkgJSON := `{"name":"demo","devDependencies":{"vitest":"^2.1.9"}}`
+	if err := os.WriteFile(filepath.Join(projDir, "package.json"), []byte(pkgJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rem := []model.WorkspacePackageFix{
+		{
+			Package:          "vitest",
+			Ecosystem:        model.EcoNPM,
+			ManifestKind:     "npm",
+			InstalledVersion: "2.1.9",
+			FixedVersion:     "4.1.0",
+			Severity:         "CRITICAL",
+		},
+		{
+			Package:          "tinypool",
+			Ecosystem:        model.EcoNPM,
+			ManifestKind:     "npm",
+			InstalledVersion: "1.1.1",
+			FixedVersion:     "2.1.2",
+			Severity:         "CRITICAL",
+		},
+		{
+			Package:          "zero-day-pkg",
+			Ecosystem:        model.EcoNPM,
+			ManifestKind:     "npm",
+			InstalledVersion: "1.0.0",
+			FixedVersion:     "",
+			Severity:         "HIGH",
+		},
+	}
+
+	for i := range rem {
+		populatePackageUpgradeDiagnostics(&rem[i], projDir)
+	}
+
+	if !rem[0].MajorUpgrade || rem[0].Transitive || rem[0].UpgradeHint != "需跨大版本 v2➔v4" {
+		t.Fatalf("unexpected vitest diagnostics: %+v", rem[0])
+	}
+	if !rem[1].MajorUpgrade || !rem[1].Transitive || rem[1].UpgradeHint != "间接依赖·跨v1➔v2" {
+		t.Fatalf("unexpected tinypool diagnostics: %+v", rem[1])
+	}
+	if rem[2].UpgradeHint != "官方未出补丁" {
+		t.Fatalf("unexpected zero-day-pkg hint: %+v", rem[2])
+	}
+
+	msg := DiagnoseWorkspaceUpgradeOutcome(projDir, "npm", 3, rem, []byte("npm error ERESOLVE unable to resolve dependency tree"), nil)
+	for _, want := range []string{
+		"ERESOLVE",
+		"[需跨大版本] vitest(2.1.9➔4.1.0)",
+		"[间接依赖·跨大版本被锁死] tinypool(1.1.1➔2.1.2)",
+		"[官方尚未发布修复补丁] zero-day-pkg(1.0.0)",
+		"overrides",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("expected diagnostic message %q to contain %q", msg, want)
+		}
+	}
+}

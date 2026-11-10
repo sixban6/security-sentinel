@@ -1001,7 +1001,11 @@ func runWorkspaceDeps(ctx context.Context, args []string) {
 			if pf.FixedVersion != "" {
 				arrow = fmt.Sprintf("%s ➔ %s", pf.InstalledVersion, pf.FixedVersion)
 			}
-			fmt.Printf("   ├─ 📦 %-22s %-20s [%s · %d CVEs]\n", pf.Package, arrow, pf.Severity, len(pf.CVEIDs))
+			hintSuffix := ""
+			if pf.UpgradeHint != "" {
+				hintSuffix = fmt.Sprintf(" (%s)", pf.UpgradeHint)
+			}
+			fmt.Printf("   ├─ 📦 %-22s %-20s [%s · %d CVEs]%s\n", pf.Package, arrow, pf.Severity, len(pf.CVEIDs), hintSuffix)
 		}
 		batchCmd := auditor.BuildProjectBatchUpgradeCmd(wp)
 		if batchCmd != "" && !strings.HasPrefix(batchCmd, "#") {
