@@ -1,5 +1,11 @@
 # Changelog
 
+## [2.7.1] - 2026-11-10
+
+### Bug Fixes
+
+* **auditor-multistack:** isolate package managers in hybrid multi-stack projects (e.g. Go desktop GUI containing Python `.venv` worker scripts). Bind `ManifestKind` per dependency to eliminate cross-ecosystem upgrade contamination (such as mistakenly using `go get` to upgrade Python packages like `pillow`), composite project badges (`gomod+venv`), and add safety guardrails against running `go get` on non-Go package paths.
+
 ## [2.7.0] - 2026-11-05
 
 ### Features

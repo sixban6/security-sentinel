@@ -1,7 +1,7 @@
 {
   "name": "Security Sentinel",
   "identifier": "com.sixban6.security-sentinel",
-  "version": "2.7.0",
+  "version": "2.7.1",
   "copyright": "Copyright (c) 2026 Security Sentinel Contributors",
   "main": "./cmd/sentinel-app",
   "out": "build",
