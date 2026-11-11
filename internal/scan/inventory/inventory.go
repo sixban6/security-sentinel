@@ -188,7 +188,9 @@ func CollectSingle(ctx context.Context, target model.HostTarget, workspaces []st
 		if fp != "" {
 			if cached, hit, osSecFresh := opts.Mem.GetInventory(hostKey, fp); hit && cached != nil {
 				cached.Target = target
-				if lat > 0 {
+				if target.IsLocal() {
+					cached.LatencyMS = 0
+				} else if lat > 0 {
 					cached.LatencyMS = lat
 				}
 				if !osSecFresh {
@@ -309,20 +311,26 @@ echo "BREW:$(command -v brew 2>/dev/null)"
 		IsRoot:         os.Geteuid() == 0,
 	}
 
-	// L5: Workspace Project Lockfiles & Virtualenvs
-	wsRes := lockfile.ScanWorkspaces(workspaces)
-	inv.EcosystemSummary = wsRes.Summary
-	inv.EcosystemSummary.Kernel = "Darwin " + krn
-	inv.OrphanedVenvs = wsRes.OrphanedVenvs
-
-	// L2 + L3 + L4: Run Homebrew/Apps, Docker/Containers, and Global Toolchains concurrently!
-	var layerWG sync.WaitGroup
-	var brewInv, dockerInv, toolInv model.HostInventory
+	// L2 + L3 + L4 + L5 + OS Security: Run concurrently, with non-blocking TCC guard on workspace directories!
+	baseOSCtx := inv.OSContext
+	var (
+		layerWG   sync.WaitGroup
+		wsRes     lockfile.WorkspaceScanResult
+		brewInv   model.HostInventory
+		dockerInv model.HostInventory
+		toolInv   model.HostInventory
+		osSecRep  model.OSSecurityReport
+		fp        string
+	)
 	brewInv.Target, brewInv.Packages = target, make(map[string]string)
 	dockerInv.Target, dockerInv.Packages = target, make(map[string]string)
 	toolInv.Target, toolInv.Packages = target, make(map[string]string)
 
-	layerWG.Add(3)
+	layerWG.Add(6)
+	go func() {
+		defer layerWG.Done()
+		wsRes, _ = scanWorkspacesWithTimeout(ctx, workspaces, 15*time.Second)
+	}()
 	go func() {
 		defer layerWG.Done()
 		ProbeHomebrewAndAppsLayer(ctx, exec, &brewInv)
@@ -335,7 +343,19 @@ echo "BREW:$(command -v brew 2>/dev/null)"
 		defer layerWG.Done()
 		ProbeGlobalToolchainsLayer(ctx, exec, &toolInv)
 	}()
+	go func() {
+		defer layerWG.Done()
+		osSecRep = ScanOSSecurity(ctx, exec, baseOSCtx, nil, intelCli)
+	}()
+	go func() {
+		defer layerWG.Done()
+		fp, _ = probeQuickFingerprint(ctx, exec, target)
+	}()
 	layerWG.Wait()
+
+	inv.EcosystemSummary = wsRes.Summary
+	inv.EcosystemSummary.Kernel = "Darwin " + krn
+	inv.OrphanedVenvs = wsRes.OrphanedVenvs
 
 	mergeLayerInventory(&inv, &brewInv)
 	mergeLayerInventory(&inv, &dockerInv)
@@ -351,12 +371,34 @@ echo "BREW:$(command -v brew 2>/dev/null)"
 
 	readLocalAppliedMitigations("/etc/sentinel/remediations", inv.AppliedMitigations)
 
-	// OS security updates (Apple same-branch patches + Homebrew security formula checks)
-	inv.OSSecurity = ScanOSSecurity(ctx, exec, inv.OSContext, nil, intelCli)
+	inv.OSSecurity = osSecRep
 	inv.OSContext = inv.OSSecurity.OSContext
-	inv.LatencyMS = time.Since(start).Milliseconds()
-	inv.Fingerprint, _ = probeQuickFingerprint(ctx, exec, target)
+	inv.LatencyMS = 0
+	inv.ScanDurationMS = time.Since(start).Milliseconds()
+	inv.Fingerprint = fp
 	return inv
+}
+
+// scanWorkspacesWithTimeout protects background scheduled scans from hanging indefinitely if macOS TCC
+// prompts for folder permission (e.g. ~/Documents after an ad-hoc binary update while screen is locked).
+func scanWorkspacesWithTimeout(ctx context.Context, workspaces []string, timeout time.Duration) (lockfile.WorkspaceScanResult, bool) {
+	if len(workspaces) == 0 {
+		return lockfile.WorkspaceScanResult{}, true
+	}
+	ch := make(chan lockfile.WorkspaceScanResult, 1)
+	go func() {
+		ch <- lockfile.ScanWorkspaces(workspaces)
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case res := <-ch:
+		return res, true
+	case <-ctx.Done():
+		return lockfile.WorkspaceScanResult{}, false
+	case <-timer.C:
+		return lockfile.WorkspaceScanResult{}, false
+	}
 }
 
 func mergeLayerInventory(dst *model.HostInventory, src *model.HostInventory) {
@@ -382,23 +424,38 @@ func mergeLayerInventory(dst *model.HostInventory, src *model.HostInventory) {
 }
 
 func collectLinuxOrRemoteInventory(ctx context.Context, exec transport.Executor, target model.HostTarget, workspaces []string, intelCli *intel.Client) model.HostInventory {
+	start := time.Now()
 	inv := model.HostInventory{
 		Target:             target,
 		Packages:           make(map[string]string),
 		AppliedMitigations: make(map[string]string),
 		DockerContainers:   make(map[string]string),
-		CollectedAt:        time.Now(),
+		CollectedAt:        start,
 	}
 
 	res, err := exec.RunStdin(ctx, "sh -s", mergedLinuxProbeScript, 20*time.Second)
-	inv.LatencyMS = res.LatencyMS
+	if target.IsLocal() {
+		inv.LatencyMS = 0
+	} else {
+		inv.LatencyMS = res.LatencyMS
+	}
 	if err != nil {
+		inv.ScanDurationMS = time.Since(start).Milliseconds()
 		inv.Error = fmt.Sprintf("SSH 连接或探针超时: %v (%s)", err, res.Stderr)
 		return inv
 	}
 	if res.Code != 0 && res.Stdout == "" {
+		inv.ScanDurationMS = time.Since(start).Milliseconds()
 		inv.Error = fmt.Sprintf("SSH 认证或连接失败 (code %d): %s", res.Code, res.Stderr)
 		return inv
+	}
+
+	// Measure pure SSH round-trip latency over the already-open ControlMaster socket
+	// instead of conflating network RTT with full remote inventory script duration.
+	if !target.IsLocal() {
+		if pingRes, pingErr := exec.Run(ctx, ":", 3*time.Second); pingErr == nil && pingRes.Code == 0 && pingRes.LatencyMS > 0 {
+			inv.LatencyMS = pingRes.LatencyMS
+		}
 	}
 
 	srcPkgMap := parseMergedLinuxProbeOutput(res.Stdout, target, &inv)
@@ -420,7 +477,7 @@ func collectLinuxOrRemoteInventory(ctx context.Context, exec transport.Executor,
 
 	// If local Linux machine, also scan workspaces!
 	if target.IsLocal() && len(workspaces) > 0 {
-		wsRes := lockfile.ScanWorkspaces(workspaces)
+		wsRes, _ := scanWorkspacesWithTimeout(ctx, workspaces, 15*time.Second)
 		wsRes.Summary.DockerContainers = inv.EcosystemSummary.DockerContainers
 		wsRes.Summary.Kernel = inv.EcosystemSummary.Kernel
 		inv.EcosystemSummary = wsRes.Summary
@@ -430,6 +487,7 @@ func collectLinuxOrRemoteInventory(ctx context.Context, exec transport.Executor,
 
 	// OS security dry-run over already-open SSH ControlMaster socket!
 	inv.OSSecurity = ScanOSSecurity(ctx, exec, inv.OSContext, srcPkgMap, intelCli)
+	inv.ScanDurationMS = time.Since(start).Milliseconds()
 	return inv
 }
 

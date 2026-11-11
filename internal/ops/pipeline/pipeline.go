@@ -243,15 +243,24 @@ func (r *Runner) RunAudit(ctx context.Context, p AuditParams) (model.AuditReport
 	if p.QuietNotify {
 		_ = notify.SaveReport(rep, p.StatusFile)
 	} else {
-		_, _ = notify.SaveAndNotify(ctx, rep, p.StatusFile, p.Config.Notifications)
+		// Always allocate an independent delivery context so notifications & Telegram pushes never fail
+		// with `context deadline exceeded` even if an upstream host probe ran close to or past scan timeout!
+		notifyCtx, notifyCancel := context.WithTimeout(context.Background(), 35*time.Second)
+		defer notifyCancel()
+
+		if _, err := notify.SaveAndNotify(notifyCtx, rep, p.StatusFile, p.Config.Notifications); err != nil {
+			r.logf(p, "  ⚠️ [Telegram 集群巡检通报发送失败] %v", err)
+		}
 		if p.Config.Notifications.Policy != "critical_only" {
 			digestAdvs := advs
 			if days < 2 {
-				if wider, err := r.Intel.FetchAllAdvisories(ctx, 2, p.Config.Advisories.IncludeKernel, p.UseAdvCache); err == nil && len(wider) > 0 {
+				if wider, err := r.Intel.FetchAllAdvisories(notifyCtx, 2, p.Config.Advisories.IncludeKernel, p.UseAdvCache); err == nil && len(wider) > 0 {
 					digestAdvs = wider
 				}
 			}
-			_, _ = notify.SendDailyCVEDigest(ctx, digestAdvs, 0, false)
+			if _, err := notify.SendDailyCVEDigest(notifyCtx, digestAdvs, 0, false); err != nil {
+				r.logf(p, "  ⚠️ [Telegram 今日最新 CVE 日报发送失败] %v", err)
+			}
 		}
 	}
 	return rep, nil

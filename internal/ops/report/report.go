@@ -53,11 +53,22 @@ func RenderHTML(rep model.AuditReport) string {
 			pillBg, pillFg = "#1e3a8a", "#93c5fd"
 		}
 
+		timingMeta := fmt.Sprintf("延迟 %dms", h.LatencyMS)
+		if h.Target.IsLocal() {
+			if h.ScanDurationMS > 0 {
+				timingMeta = fmt.Sprintf("本机直连 · 采集 %.1fs", float64(h.ScanDurationMS)/1000.0)
+			} else {
+				timingMeta = "本机直连"
+			}
+		} else if h.LatencyMS > 0 && h.ScanDurationMS > 0 {
+			timingMeta = fmt.Sprintf("延迟 %dms · 采集 %.1fs", h.LatencyMS, float64(h.ScanDurationMS)/1000.0)
+		}
+
 		fmt.Fprintf(&hostCards, `<div class="card">
   <div class="card-head">
     <div>
       <h3>%s</h3>
-      <div class="muted">%s · 内核 %s · 资产 %d 项 · 延迟 %dms</div>
+      <div class="muted">%s · 内核 %s · 资产 %d 项 · %s</div>
     </div>
     <span class="pill" style="background:%s;color:%s">%s (%d分)</span>
   </div>
@@ -66,7 +77,7 @@ func RenderHTML(rep model.AuditReport) string {
 			html.EscapeString(h.OSContext.OSPretty),
 			html.EscapeString(h.OSContext.KernelRelease),
 			h.AssetsCount,
-			h.LatencyMS,
+			html.EscapeString(timingMeta),
 			pillBg, pillFg,
 			html.EscapeString(h.Status),
 			h.HealthScore,

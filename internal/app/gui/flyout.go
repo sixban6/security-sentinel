@@ -134,7 +134,7 @@ func (s *AppState) FlyoutView(c *ui.Context) {
 					ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
 						hostTitle := firstNonEmptyStr(h.Host, h.Target.Name)
 						ui.Text(c, hostTitle).Grow(1).FontSize(13).Bold().SingleLine()
-						if h.LatencyMS > 0 {
+						if !h.Target.IsLocal() && h.LatencyMS > 0 {
 							ui.Text(c, fmt.Sprintf("%dms", h.LatencyMS)).FontSize(11).TextColor(t.TextMuted)
 						}
 						stBg, stFg := statusColors(h.Status)

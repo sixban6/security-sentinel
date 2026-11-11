@@ -51,6 +51,7 @@ state.yaml
 discovered_inventory.yaml
 applied_mitigations.json
 credentials.json
+vault.enc
 mygo-update.key
 
 # User custom environment configuration

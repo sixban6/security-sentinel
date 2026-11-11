@@ -175,8 +175,8 @@ func SaveAndNotify(ctx context.Context, rep model.AuditReport, statusFile string
 		SendDesktopNotification("audit:latest", "Security Sentinel 安全巡检", fmt.Sprintf("集群健康分 %d/100", rep.ClusterScore), plainSummary)
 	}
 	tgMsg := FormatTelegramHTML(rep, 10)
-	_, _ = SendTelegram(ctx, tgMsg, "", "")
-	return plainSummary, nil
+	_, tgErr := SendTelegram(ctx, tgMsg, "", "")
+	return plainSummary, tgErr
 }
 
 // SendDesktopNotification uses MyGo's native Notification API in GUI mode,
@@ -400,6 +400,8 @@ func SplitTelegramMessage(msg string, maxBytes int) []string {
 }
 
 // SendTelegram sends HTML-formatted notification chunks using stored credentials (never auto-binding random strangers!).
+// If ctx is nil or already expired (e.g. an upstream scan hit its timeout before producing a partial report),
+// SendTelegram allocates an independent 25s delivery timeout so critical alerts are never silently dropped.
 func SendTelegram(ctx context.Context, message, overrideToken, overrideChatID string) (bool, error) {
 	token := strings.TrimSpace(overrideToken)
 	if token == "" {
@@ -413,16 +415,45 @@ func SendTelegram(ctx context.Context, message, overrideToken, overrideChatID st
 		return false, nil
 	}
 
+	sendCtx := ctx
+	if sendCtx == nil || sendCtx.Err() != nil {
+		var cancel context.CancelFunc
+		sendCtx, cancel = context.WithTimeout(context.Background(), 25*time.Second)
+		defer cancel()
+	}
+
 	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", token)
 	for _, chunk := range SplitTelegramMessage(message, 3900) {
-		if err := postTelegramChunk(ctx, apiURL, chatID, chunk, "HTML"); err != nil {
+		if err := postTelegramChunkWithRetry(sendCtx, apiURL, chatID, chunk, "HTML"); err != nil {
 			// Fallback to plain text if HTML tag validation fails
-			if err2 := postTelegramChunk(ctx, apiURL, chatID, chunk, ""); err2 != nil {
+			if err2 := postTelegramChunkWithRetry(sendCtx, apiURL, chatID, chunk, ""); err2 != nil {
 				return false, err2
 			}
 		}
 	}
 	return true, nil
+}
+
+func postTelegramChunkWithRetry(ctx context.Context, apiURL, chatID, text, parseMode string) error {
+	err := postTelegramChunk(ctx, apiURL, chatID, text, parseMode)
+	if err == nil {
+		return nil
+	}
+	// Do not retry HTTP 400 parse errors on HTML mode (caller falls back to plain text immediately).
+	if strings.Contains(err.Error(), "Telegram HTTP 400") {
+		return err
+	}
+	if ctx.Err() != nil {
+		return err
+	}
+	timer := time.NewTimer(1200 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return err
+	case <-timer.C:
+		return postTelegramChunk(ctx, apiURL, chatID, text, parseMode)
+	}
 }
 
 func postTelegramChunk(ctx context.Context, apiURL, chatID, text, parseMode string) error {

@@ -18,6 +18,7 @@ var cargoCratesV1Re = regexp.MustCompile(`^"([A-Za-z0-9_\-]+)\s+([0-9][^\s"]*)\s
 // ProbeHomebrewAndAppsLayer (L2) collects full Homebrew Formulae, Homebrew Casks, and macOS /Applications bundles.
 func ProbeHomebrewAndAppsLayer(ctx context.Context, exec transport.Executor, inv *model.HostInventory) {
 	probe := `
+export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 HOMEBREW_NO_ENV_HINTS=1
 if command -v brew >/dev/null 2>&1; then
   echo "===BREW_VER===:$(brew --version 2>/dev/null | head -n 1)"
   echo "===BREW_FORMULAE==="

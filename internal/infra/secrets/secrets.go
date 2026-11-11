@@ -1,6 +1,7 @@
 package secrets
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/sixban6/security-sentinel/internal/infra/config"
 )
@@ -27,6 +29,17 @@ const (
 	KeyClashAPISecret   = "clash_api_secret"
 )
 
+var allCredentialKeys = []string{
+	KeyTelegramBotToken,
+	KeyTelegramChatID,
+	KeyGitHubToken,
+	KeyAIGatewayToken,
+	KeyGeminiAPIKey,
+	KeyOpenAIAPIKey,
+	KeyAnthropicAPIKey,
+	KeyClashAPISecret,
+}
+
 var envVarMap = map[string]string{
 	KeyTelegramBotToken: "TELEGRAM_BOT_TOKEN",
 	KeyTelegramChatID:   "TELEGRAM_CHAT_ID",
@@ -38,7 +51,7 @@ var envVarMap = map[string]string{
 	KeyClashAPISecret:   "CLASH_API_SECRET",
 }
 
-// NativeBackend allows GUI (mygo.Secrets) to register native OS keychain hooks.
+// NativeBackend allows optional OS keychain hooks when SENTINEL_USE_OS_KEYCHAIN=1 is explicitly set.
 type NativeBackend interface {
 	Get(key string) (string, error)
 	Set(key, value string) error
@@ -49,9 +62,10 @@ var (
 	mu            sync.RWMutex
 	nativeBackend NativeBackend
 	memCache      = make(map[string]string)
+	migratedVault = make(map[string]bool)
 )
 
-// RegisterNativeBackend wires mygo.Secrets when running inside the desktop app.
+// RegisterNativeBackend wires optional OS keychain hooks (only active when SENTINEL_USE_OS_KEYCHAIN=1).
 func RegisterNativeBackend(b NativeBackend) {
 	mu.Lock()
 	defer mu.Unlock()
@@ -59,8 +73,13 @@ func RegisterNativeBackend(b NativeBackend) {
 	memCache = make(map[string]string)
 }
 
+func useOSKeychain() bool {
+	return strings.TrimSpace(os.Getenv("SENTINEL_USE_OS_KEYCHAIN")) == "1" &&
+		strings.TrimSpace(os.Getenv("SENTINEL_DISABLE_KEYCHAIN")) == ""
+}
+
 func cacheSlotKey(key string) string {
-	return credentialsFilePath() + "|" + os.Getenv("SENTINEL_DISABLE_KEYCHAIN") + "|" + key
+	return vaultFilePath() + "|" + os.Getenv("SENTINEL_USE_OS_KEYCHAIN") + "|" + os.Getenv("SENTINEL_DISABLE_KEYCHAIN") + "|" + key
 }
 
 func credentialsFilePath() string {
@@ -97,10 +116,9 @@ func GetAIGatewayToken(provider string) string {
 
 // Get retrieves a credential with priority:
 // 1. Explicit environment variable
-// 2. In-memory cache (avoids 60-120fps OS Keychain IPC / subprocess / disk I/O stalls in GUI render loops)
-// 3. Registered MyGo OS Keychain backend (or macOS /usr/bin/security Keychain lookup)
-// 4. 0600 local credentials.json fallback
-// 5. Legacy ~/.gemini/config/sentinel_telegram.json read-only migration fallback
+// 2. In-memory cache (avoids disk/crypto/subprocess overhead in 60-120fps GUI render loops)
+// 3. Hardware-bound AES-256-GCM local encrypted vault (~/.config/sentinel/vault.enc) — zero OS Keychain popups
+// 4. Legacy ~/.gemini/config/sentinel_telegram.json read-only fallback & optional `gh auth token`
 func Get(key string) string {
 	if envName, ok := envVarMap[key]; ok {
 		if v := strings.TrimSpace(os.Getenv(envName)); v != "" {
@@ -111,34 +129,129 @@ func Get(key string) string {
 	slot := cacheSlotKey(key)
 	mu.RLock()
 	cachedVal, hit := memCache[slot]
-	nb := nativeBackend
 	mu.RUnlock()
 	if hit {
 		return cachedVal
 	}
 
-	val := resolveUncached(key, nb)
-
 	mu.Lock()
+	defer mu.Unlock()
 	if memCache == nil {
 		memCache = make(map[string]string)
 	}
+	if cachedVal, hit := memCache[slot]; hit {
+		return cachedVal
+	}
+
+	val := resolveUncachedLocked(key)
 	memCache[slot] = val
-	mu.Unlock()
 	return val
 }
 
-func resolveUncached(key string, nb NativeBackend) string {
-	if nb != nil {
-		if v, err := nb.Get(key); err == nil && strings.TrimSpace(v) != "" {
-			return strings.TrimSpace(v)
+func loadOrInitVaultLocked() map[string]string {
+	vPath := vaultFilePath()
+	id := cachedMachineIDFn()
+	vm, err := loadVaultMapWithIdentity(vPath, id)
+	if err != nil || vm == nil {
+		vm = make(map[string]string)
+	}
+
+	if migratedVault[vPath] || vm[vaultMigratedFlagKey] == "1" {
+		migratedVault[vPath] = true
+		return vm
+	}
+
+	// Mark migrated FIRST and persist immediately so legacy Keychain migration never runs twice.
+	migratedVault[vPath] = true
+	vm[vaultMigratedFlagKey] = "1"
+	_ = saveVaultMapWithIdentity(vPath, vm, id)
+	dirty := false
+
+	// 1. Migrate legacy plaintext ~/.config/sentinel/credentials.json and shred plaintext file.
+	credPath := credentialsFilePath()
+	if legacyMap, err := loadFileMap(credPath); err == nil {
+		for k, v := range legacyMap {
+			if trimmed := strings.TrimSpace(v); trimmed != "" && strings.TrimSpace(vm[k]) == "" {
+				vm[k] = trimmed
+				dirty = true
+			}
 		}
-	} else if runtime.GOOS == "darwin" && os.Getenv("SENTINEL_DISABLE_KEYCHAIN") == "" {
-		if v := darwinKeychainGet(key); v != "" {
-			return v
+		_ = os.Remove(credPath)
+	}
+
+	// 2. Import legacy v1 ~/.gemini/config/sentinel_telegram.json into encrypted vault.
+	legacyTGPath := config.ExpandHome("~/.gemini/config/sentinel_telegram.json")
+	if tgMap, err := loadFileMap(legacyTGPath); err == nil {
+		if tok := strings.TrimSpace(tgMap["bot_token"]); tok != "" && strings.TrimSpace(vm[KeyTelegramBotToken]) == "" {
+			vm[KeyTelegramBotToken] = tok
+			dirty = true
+		}
+		if cid := strings.TrimSpace(tgMap["chat_id"]); cid != "" && strings.TrimSpace(vm[KeyTelegramChatID]) == "" {
+			vm[KeyTelegramChatID] = cid
+			dirty = true
 		}
 	}
 
+	// 3. One-time import & cleanup of legacy macOS Keychain items (metadata-first check, zero popup if absent).
+	if runtime.GOOS == "darwin" && os.Getenv("SENTINEL_DISABLE_KEYCHAIN") == "" && !useOSKeychain() {
+		for _, k := range allCredentialKeys {
+			if !darwinKeychainHasItem(k) {
+				continue
+			}
+			if strings.TrimSpace(vm[k]) == "" {
+				var got string
+				if nativeBackend != nil {
+					if v, err := nativeBackend.Get(k); err == nil {
+						got = strings.TrimSpace(v)
+					}
+				}
+				if got == "" {
+					got = darwinKeychainGet(k)
+				}
+				if got != "" {
+					vm[k] = got
+					dirty = true
+					_ = saveVaultMapWithIdentity(vPath, vm, id)
+					_ = darwinKeychainDelete(k)
+					if nativeBackend != nil {
+						_ = nativeBackend.Delete(k)
+					}
+				}
+			} else {
+				// Vault already holds this secret; remove stale Keychain item so it never prompts again.
+				_ = darwinKeychainDelete(k)
+				if nativeBackend != nil {
+					_ = nativeBackend.Delete(k)
+				}
+			}
+		}
+	}
+
+	if dirty {
+		_ = saveVaultMapWithIdentity(vPath, vm, id)
+	}
+	return vm
+}
+
+func resolveUncachedLocked(key string) string {
+	if useOSKeychain() {
+		if nativeBackend != nil {
+			if v, err := nativeBackend.Get(key); err == nil && strings.TrimSpace(v) != "" {
+				return strings.TrimSpace(v)
+			}
+		} else if runtime.GOOS == "darwin" {
+			if v := darwinKeychainGet(key); v != "" {
+				return v
+			}
+		}
+	}
+
+	vm := loadOrInitVaultLocked()
+	if v := strings.TrimSpace(vm[key]); v != "" {
+		return v
+	}
+
+	// Read-only fallback to legacy ~/.config/sentinel/credentials.json if created externally after migration
 	if m, err := loadFileMap(credentialsFilePath()); err == nil {
 		if v := strings.TrimSpace(m[key]); v != "" {
 			return v
@@ -160,7 +273,9 @@ func resolveUncached(key string, nb NativeBackend) string {
 
 	// For GitHub token, optionally query `gh auth token` once if installed
 	if key == KeyGitHubToken && os.Getenv("SENTINEL_SKIP_GH_CLI") == "" {
-		if out, err := exec.Command("gh", "auth", "token").Output(); err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if out, err := exec.CommandContext(ctx, "gh", "auth", "token").Output(); err == nil {
 			if tok := strings.TrimSpace(string(out)); tok != "" {
 				return tok
 			}
@@ -170,7 +285,7 @@ func resolveUncached(key string, nb NativeBackend) string {
 	return ""
 }
 
-// Set stores a credential securely in the OS Keychain (when available) and/or 0600 fallback file.
+// Set stores a credential securely in the hardware-bound AES-256-GCM encrypted vault (~/.config/sentinel/vault.enc).
 func Set(key, value string) error {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -179,41 +294,63 @@ func Set(key, value string) error {
 
 	slot := cacheSlotKey(key)
 	mu.Lock()
+	defer mu.Unlock()
 	if memCache == nil {
 		memCache = make(map[string]string)
 	}
 	memCache[slot] = value
-	nb := nativeBackend
-	mu.Unlock()
-	if nb != nil {
-		if err := nb.Set(key, value); err == nil {
-			// Also remove any stale plaintext entry in fallback file
-			_ = deleteFromFileMap(credentialsFilePath(), key)
-			return nil
-		}
-	} else if runtime.GOOS == "darwin" && os.Getenv("SENTINEL_DISABLE_KEYCHAIN") == "" {
-		if err := darwinKeychainSet(key, value); err == nil {
-			_ = deleteFromFileMap(credentialsFilePath(), key)
-			return nil
+
+	if useOSKeychain() {
+		if nativeBackend != nil {
+			if err := nativeBackend.Set(key, value); err == nil {
+				_ = deleteFromFileMap(credentialsFilePath(), key)
+				return nil
+			}
+		} else if runtime.GOOS == "darwin" {
+			if err := darwinKeychainSet(key, value); err == nil {
+				_ = deleteFromFileMap(credentialsFilePath(), key)
+				return nil
+			}
 		}
 	}
 
-	return saveToFileMap(credentialsFilePath(), key, value)
+	vm := loadOrInitVaultLocked()
+	vm[vaultMigratedFlagKey] = "1"
+	vm[key] = value
+	err := saveVaultMapWithIdentity(vaultFilePath(), vm, cachedMachineIDFn())
+	_ = deleteFromFileMap(credentialsFilePath(), key)
+	if runtime.GOOS == "darwin" && os.Getenv("SENTINEL_DISABLE_KEYCHAIN") == "" && !useOSKeychain() && darwinKeychainHasItem(key) {
+		_ = darwinKeychainDelete(key)
+	}
+	return err
 }
 
-// Delete removes a credential from Keychain and local fallback storage.
+// Delete removes a credential from the encrypted vault (and any legacy storage).
 func Delete(key string) error {
 	slot := cacheSlotKey(key)
 	mu.Lock()
+	defer mu.Unlock()
 	if memCache != nil {
 		memCache[slot] = ""
 	}
-	nb := nativeBackend
-	mu.Unlock()
-	if nb != nil {
-		_ = nb.Delete(key)
-	} else if runtime.GOOS == "darwin" && os.Getenv("SENTINEL_DISABLE_KEYCHAIN") == "" {
+
+	if useOSKeychain() {
+		if nativeBackend != nil {
+			_ = nativeBackend.Delete(key)
+		} else if runtime.GOOS == "darwin" {
+			_ = darwinKeychainDelete(key)
+		}
+	} else if runtime.GOOS == "darwin" && os.Getenv("SENTINEL_DISABLE_KEYCHAIN") == "" && darwinKeychainHasItem(key) {
 		_ = darwinKeychainDelete(key)
+	}
+
+	vm := loadOrInitVaultLocked()
+	if _, exists := vm[key]; exists {
+		delete(vm, key)
+		vm[vaultMigratedFlagKey] = "1"
+		if err := saveVaultMapWithIdentity(vaultFilePath(), vm, cachedMachineIDFn()); err != nil {
+			return err
+		}
 	}
 	return deleteFromFileMap(credentialsFilePath(), key)
 }
@@ -230,8 +367,18 @@ func Masked(val string) string {
 	return val[:4] + "••••" + val[len(val)-4:]
 }
 
+// darwinKeychainHasItem checks Keychain item metadata WITHOUT `-w`, which never triggers a password prompt.
+func darwinKeychainHasItem(account string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "/usr/bin/security", "find-generic-password", "-s", ServiceName, "-a", account)
+	return cmd.Run() == nil
+}
+
 func darwinKeychainGet(account string) string {
-	cmd := exec.Command("/usr/bin/security", "find-generic-password", "-s", ServiceName, "-a", account, "-w")
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "/usr/bin/security", "find-generic-password", "-s", ServiceName, "-a", account, "-w")
 	out, err := cmd.Output()
 	if err != nil {
 		return ""
@@ -240,12 +387,16 @@ func darwinKeychainGet(account string) string {
 }
 
 func darwinKeychainSet(account, secret string) error {
-	cmd := exec.Command("/usr/bin/security", "add-generic-password", "-U", "-s", ServiceName, "-a", account, "-w", secret)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "/usr/bin/security", "add-generic-password", "-U", "-s", ServiceName, "-a", account, "-w", secret)
 	return cmd.Run()
 }
 
 func darwinKeychainDelete(account string) error {
-	cmd := exec.Command("/usr/bin/security", "delete-generic-password", "-s", ServiceName, "-a", account)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "/usr/bin/security", "delete-generic-password", "-s", ServiceName, "-a", account)
 	return cmd.Run()
 }
 
@@ -266,30 +417,6 @@ func loadFileMap(path string) (map[string]string, error) {
 		}
 	}
 	return out, nil
-}
-
-func saveToFileMap(path, key, val string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	m, err := loadFileMap(path)
-	if err != nil || m == nil {
-		m = make(map[string]string)
-	}
-	m[key] = val
-	data, err := json.MarshalIndent(m, "", "  ")
-	if err != nil {
-		return err
-	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return err
-	}
-	if err := os.Chmod(tmp, 0o600); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return os.Rename(tmp, path)
 }
 
 func deleteFromFileMap(path, key string) error {

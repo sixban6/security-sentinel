@@ -3,6 +3,7 @@ package gui
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -45,7 +46,9 @@ func RunDesktopApp(cfgPath string, openMainImmediately bool) error {
 	// Automatically retire any leftover v1 macOS launchd plist so there is never dual-scheduler conflict!
 	_ = scheduler.RetireLegacyMacOSLaunchd()
 
-	secrets.RegisterNativeBackend(mygoSecretsAdapter{})
+	if strings.TrimSpace(os.Getenv("SENTINEL_USE_OS_KEYCHAIN")) == "1" {
+		secrets.RegisterNativeBackend(mygoSecretsAdapter{})
+	}
 	s := NewAppState(cfgPath, false)
 
 	mygo.App.SetName("Security Sentinel")

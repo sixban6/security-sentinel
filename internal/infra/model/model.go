@@ -3,7 +3,7 @@ package model
 import "time"
 
 // Version is stamped via -ldflags during release builds.
-var Version = "2.7.4"
+var Version = "2.7.5"
 
 // Standard 6-state host security statuses (backwards-compatible with v1 labels).
 const (
@@ -248,6 +248,7 @@ type HostInventory struct {
 	OrphanedVenvs      []OrphanedVenv    `json:"orphaned_venvs,omitempty" yaml:"orphaned_venvs,omitempty"`
 	DockerContainers   map[string]string `json:"docker_containers,omitempty" yaml:"docker_containers,omitempty"`
 	LatencyMS          int64             `json:"latency_ms" yaml:"latency_ms"`
+	ScanDurationMS     int64             `json:"scan_duration_ms,omitempty" yaml:"scan_duration_ms,omitempty"`
 	CollectedAt        time.Time         `json:"collected_at" yaml:"collected_at"`
 	Fingerprint        string            `json:"fingerprint,omitempty" yaml:"fingerprint,omitempty"`
 	Error              string            `json:"error,omitempty" yaml:"error,omitempty"`
@@ -357,6 +358,7 @@ type HostAuditResult struct {
 	Detail                  string               `json:"detail" yaml:"detail"`
 	HealthScore             int                  `json:"health_score" yaml:"health_score"`
 	LatencyMS               int64                `json:"latency_ms" yaml:"latency_ms"`
+	ScanDurationMS          int64                `json:"scan_duration_ms,omitempty" yaml:"scan_duration_ms,omitempty"`
 	CVEs                    []string             `json:"cves,omitempty" yaml:"cves,omitempty"`
 	Vulnerabilities          []VulnerabilityMatch    `json:"vulnerabilities" yaml:"vulnerabilities"`
 	UnmitigatedItems         []VulnerabilityMatch    `json:"unmitigated_items,omitempty" yaml:"unmitigated_items,omitempty"`

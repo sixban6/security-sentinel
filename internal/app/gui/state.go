@@ -155,7 +155,7 @@ type AppState struct {
 	CVESeverityTab     int    // 0: All, 1: CRITICAL, 2: HIGH, 3: MEDIUM
 	CVEEcosystemChoice string // "全部生态" or specific ecosystem
 	CVESearchQuery     string
-	CVEDaysChoice      string // "昨今两日", "近 1 天", "近 3 天", "近 7 天", "近 14 天"
+	CVEDaysChoice      string // "今日", "近 2 天", "近 3 天", "近 7 天", "近 14 天"
 	CVEListState       ui.ListState
 
 	// Panorama 5-Layer Asset Explorer Modal State
@@ -247,7 +247,7 @@ func NewAppState(cfgPath string, headless bool) *AppState {
 		WorkspaceJobStatus: make(map[string]string),
 		DailyAdvisories:    make(map[string]model.Advisory),
 		CVEEcosystemChoice: "全部生态",
-		CVEDaysChoice:      "昨今两日",
+		CVEDaysChoice:      "今日",
 		ScanModeLabel:     scanModeToLabel(cfg.Notifications.ScanMode),
 		ScanIntervalLabel: hoursToIntervalLabel(cfg.Notifications.AutoScanHours),
 		DailyScanTimeStr:  firstNonEmptyStr(cfg.Notifications.DailyScanTime, "09:00"),
@@ -295,23 +295,29 @@ func parseDaysChoice(lbl string) int {
 	switch lbl {
 	case "近 1 天":
 		return 1
+	case "近 2 天":
+		return 2
 	case "近 7 天":
 		return 7
 	case "近 14 天":
 		return 14
 	default:
+		// "今日" and "近 3 天" both fetch 3 days so UTC-to-local calendar conversion never misses morning CVEs
+		// and shares the primary L2 advisory cache.
 		return 3
 	}
 }
 
-// parseDigestDaysChoice returns 0 for "昨今两日" (so SendDailyCVEDigest filters strictly to [yesterday, today]),
+// parseDigestDaysChoice returns 0 for "今日" (so SendDailyCVEDigest filters strictly to local Today [00:00~23:59]),
 // or explicit day count otherwise.
 func parseDigestDaysChoice(lbl string) int {
 	switch lbl {
-	case "", "昨今两日":
+	case "", "今日":
 		return 0
 	case "近 1 天":
 		return 1
+	case "近 2 天":
+		return 2
 	case "近 7 天":
 		return 7
 	case "近 14 天":
@@ -494,7 +500,7 @@ func (s *AppState) PushDailyCVEDigestToTelegramAsync() {
 			case !sent:
 				s.StatusBanner = "未发送：请先在「钥匙串与智能策略」页配置并配对 Telegram 机器人"
 			case digestDays <= 0:
-				s.StatusBanner = "✈️ 已将昨今两日分类 CVE 情报日报单独推送至您的 Telegram！"
+				s.StatusBanner = "✈️ 已将今日分类 CVE 情报日报单独推送至您的 Telegram！"
 			default:
 				s.StatusBanner = fmt.Sprintf("✈️ 已将近 %d 天分类 CVE 情报日报单独推送至您的 Telegram！", digestDays)
 			}
@@ -535,6 +541,12 @@ func reconcileReportWithConfig(rep model.AuditReport, cfg config.Config) model.A
 			existing.Target = target
 			if strings.TrimSpace(existing.Host) == "" || (existing.Target.IsLocal() && strings.Contains(existing.Host, "macOS")) {
 				existing.Host = target.Name
+			}
+			if existing.Target.IsLocal() && existing.LatencyMS > 0 {
+				if existing.ScanDurationMS == 0 {
+					existing.ScanDurationMS = existing.LatencyMS
+				}
+				existing.LatencyMS = 0
 			}
 			if existing.HealthScore == 0 && existing.Status == model.StatusClean {
 				existing.HealthScore = 100
@@ -1672,6 +1684,38 @@ func (s *AppState) NextScheduledScanInfo(now time.Time) (nextDue time.Time, dueN
 	case "manual":
 		return time.Time{}, false, lastStr + " · 仅手动巡检"
 
+	case "twice_daily":
+		hh, mm := parseHHMM(s.Cfg.Notifications.DailyScanTime)
+		loc := now.Location()
+		hA := hh % 12
+		hB := hA + 12
+		slotA := time.Date(now.Year(), now.Month(), now.Day(), hA, mm, 0, 0, loc)
+		slotB := time.Date(now.Year(), now.Month(), now.Day(), hB, mm, 0, 0, loc)
+
+		var latestSlot, nextSlot time.Time
+		switch {
+		case now.Before(slotA):
+			latestSlot = slotB.Add(-24 * time.Hour)
+			nextSlot = slotA
+		case now.Before(slotB):
+			latestSlot = slotA
+			nextSlot = slotB
+		default:
+			latestSlot = slotB
+			nextSlot = slotA.Add(24 * time.Hour)
+		}
+
+		if s.LastScanAt.IsZero() || s.LastScanAt.Before(latestSlot) {
+			return latestSlot, true, fmt.Sprintf("%s · %s 待补跑 (%02d:%02d/%02d:%02d)",
+				lastStr, latestSlot.Format("15:04"), hA, mm, hB, mm)
+		}
+		nextPrefix := "今日 "
+		if nextSlot.Day() != now.Day() {
+			nextPrefix = "明日 "
+		}
+		return nextSlot, false, fmt.Sprintf("%s · 下次%s%02d:%02d (%02d:%02d/%02d:%02d)",
+			lastStr, nextPrefix, nextSlot.Hour(), nextSlot.Minute(), hA, mm, hB, mm)
+
 	case "daily":
 		hh, mm := parseHHMM(s.Cfg.Notifications.DailyScanTime)
 		loc := now.Location()
@@ -1709,6 +1753,8 @@ func (s *AppState) NextScheduledScanInfo(now time.Time) (nextDue time.Time, dueN
 
 func scanModeToLabel(mode string) string {
 	switch mode {
+	case "twice_daily":
+		return "每日双点巡检"
 	case "daily":
 		return "每日定点巡检"
 	case "manual":
@@ -1720,6 +1766,8 @@ func scanModeToLabel(mode string) string {
 
 func labelToScanMode(lbl string) string {
 	switch lbl {
+	case "每日双点巡检":
+		return "twice_daily"
 	case "每日定点巡检":
 		return "daily"
 	case "仅手动巡检":

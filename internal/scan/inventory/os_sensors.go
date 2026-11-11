@@ -398,7 +398,7 @@ func checkDarwinSecurityUpdates(ctx context.Context, exec transport.Executor, os
 	if osCtx.PkgMgr != "brew" {
 		return updates
 	}
-	res, err := exec.Run(ctx, "brew outdated --json=v2 2>/dev/null", 12*time.Second)
+	res, err := exec.Run(ctx, "HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 HOMEBREW_NO_ENV_HINTS=1 brew outdated --json=v2 2>/dev/null", 12*time.Second)
 	if err != nil || res.Code != 0 || res.Stdout == "" {
 		return updates
 	}

@@ -493,7 +493,15 @@ func (s *AppState) renderHostsAndDoctorPage(c *ui.Context) {
 								ui.Badge(c, "待平滑重启").Background(ui.Hex("#f59e0b").Alpha(0.2)).TextColor(ui.Hex("#d97706"))
 							}
 							ui.Spacer(c)
-							if h.LatencyMS > 0 {
+							if h.Target.IsLocal() {
+								if h.ScanDurationMS > 0 {
+									ui.Text(c, fmt.Sprintf("本机直连 · 采集 %.1fs", float64(h.ScanDurationMS)/1000.0)).FontSize(12).TextColor(t.TextMuted)
+								} else {
+									ui.Text(c, "本机直连").FontSize(12).TextColor(t.TextMuted)
+								}
+							} else if h.LatencyMS > 0 && h.ScanDurationMS > 0 {
+								ui.Text(c, fmt.Sprintf("延迟 %dms · 采集 %.1fs", h.LatencyMS, float64(h.ScanDurationMS)/1000.0)).FontSize(12).TextColor(t.TextMuted)
+							} else if h.LatencyMS > 0 {
 								ui.Text(c, fmt.Sprintf("延迟 %dms", h.LatencyMS)).FontSize(12).TextColor(t.TextMuted)
 							}
 							stBg, stFg := statusColors(h.Status)
@@ -1039,20 +1047,20 @@ func (s *AppState) renderHistoryRollbackPage(c *ui.Context) {
 }
 
 // ============================================================================
-// Page 6: OS Keychain Vault (mygo.Secrets) & Smart Desktop Policies
+// Page 6: Hardware-Bound Encrypted Vault (AES-256-GCM) & Smart Desktop Policies
 // ============================================================================
 func (s *AppState) renderSettingsVaultPage(c *ui.Context) {
 	t := c.Theme()
 	ui.Scroll(c.Key("settings-scroll")).Grow(1).Padding(22).Gap(16).Children(func() {
 		ui.Row(c).AlignItems(ui.Center).Children(func() {
 			ui.Column(c).Grow(1).Gap(2).Children(func() {
-				ui.Text(c, "系统钥匙串保险箱与智能守护策略").FontSize(18).Bold()
-				ui.Text(c, "所有 API Token 均直接加密托管于操作系统原生钥匙串 (macOS Keychain / Secret Service)，配置文件零明文").
+				ui.Text(c, "本机加密保险箱与智能守护策略").FontSize(18).Bold()
+				ui.Text(c, "所有 API Token 均由本机硬件指纹派生密钥 (AES-256-GCM + HKDF-SHA256) 加密存储于 vault.enc，零明文落盘、零钥匙串密码弹窗").
 					FontSize(12).TextColor(t.TextMuted)
 			})
 			ui.PrimaryButton(c.Key("btn-save-settings"), "保存全部设置").OnClick(func() {
 				s.SaveSettings()
-				c.Toast("设置与钥匙串凭据已安全保存")
+				c.Toast("设置与加密保险箱凭据已安全保存")
 			})
 		})
 
@@ -1113,16 +1121,16 @@ func (s *AppState) renderSettingsVaultPage(c *ui.Context) {
 			ui.Row(c).Gap(12).AlignItems(ui.Center).Children(func() {
 				ui.Text(c, "自动巡检模式").Grow(1)
 				ui.Select(c.Key("sel-scan-mode"), &s.ScanModeLabel,
-					[]string{"定频间隔巡检", "每日定点巡检", "仅手动巡检"}).
+					[]string{"定频间隔巡检", "每日双点巡检", "每日定点巡检", "仅手动巡检"}).
 					Width(180).Label("自动巡检模式")
 
 				if s.ScanModeLabel == "定频间隔巡检" {
 					ui.Select(c.Key("sel-scan-iv"), &s.ScanIntervalLabel,
 						[]string{"每 4 小时", "每 8 小时", "每 12 小时", "每 24 小时"}).
 						Width(150).Label("巡检间隔")
-				} else if s.ScanModeLabel == "每日定点巡检" {
+				} else if s.ScanModeLabel == "每日定点巡检" || s.ScanModeLabel == "每日双点巡检" {
 					ui.TextInput(c.Key("in-daily-time"), &s.DailyScanTimeStr).
-						Placeholder("如 09:00").Width(130).Label("每日巡检时间")
+						Placeholder("如 12:00").Width(130).Label("基准巡检时间")
 				}
 			})
 
@@ -1178,7 +1186,7 @@ func (s *AppState) renderSettingsVaultPage(c *ui.Context) {
 				ui.Badge(c, "当前状态: "+secrets.Masked(secrets.Get(secrets.KeyTelegramChatID)))
 			})
 			ui.TextInput(c.Key("in-tg-tok"), &s.TGTokenDraft).Password().
-				Placeholder("粘贴新 Bot Token 更新钥匙串 (当前: " + secrets.Masked(secrets.Get(secrets.KeyTelegramBotToken)) + ")").
+				Placeholder("粘贴新 Bot Token 更新加密保险箱 (当前: " + secrets.Masked(secrets.Get(secrets.KeyTelegramBotToken)) + ")").
 				Label("Telegram Bot Token")
 
 			ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
@@ -1202,7 +1210,7 @@ func (s *AppState) renderSettingsVaultPage(c *ui.Context) {
 								} else {
 									s.TGTokenDraft = ""
 									s.TGPairCode = ""
-									s.TGPairStatus = fmt.Sprintf("🎉 绑定成功！Chat ID: %s (%s) 已锁入系统钥匙串", cid, who)
+									s.TGPairStatus = fmt.Sprintf("🎉 绑定成功！Chat ID: %s (%s) 已锁入本机加密保险箱", cid, who)
 								}
 							})
 						}()
@@ -1278,7 +1286,7 @@ func (s *AppState) renderSettingsVaultPage(c *ui.Context) {
 					Placeholder(basePlaceholder).Label("网关 BaseURL")
 
 				ui.TextInput(c.Key("in-ai-gw-tok"), &s.AIGatewayTokenDraft).Password().
-					Placeholder("输入网关访问 Token / API Key 锁入系统钥匙串 (当前: " + secrets.Masked(secrets.GetAIGatewayToken(s.AIProvider)) + ")").
+					Placeholder("输入网关访问 Token / API Key 锁入本机加密保险箱 (当前: " + secrets.Masked(secrets.GetAIGatewayToken(s.AIProvider)) + ")").
 					Label("网关 Token")
 			}
 
@@ -1295,7 +1303,7 @@ func (s *AppState) renderSettingsVaultPage(c *ui.Context) {
 
 		// 5. Infrastructure Credentials Vault (GitHub & Clash)
 		ui.Column(c).Padding(16, 20).Radius(12).Gap(10).Background(t.Surface).Border(1, t.Border).Children(func() {
-			ui.Text(c, "🔑 第三方基础设施钥匙串 (GitHub 情报配额与 Clash 切流网关)").FontSize(15).Bold()
+			ui.Text(c, "🔑 第三方基础设施保险箱 (GitHub 情报配额与 Clash 切流网关)").FontSize(15).Bold()
 			ui.TextInput(c.Key("in-gh-tok"), &s.GHTokenDraft).Password().
 				Placeholder("GitHub Token 提升配额至 5000次/h (当前: " + secrets.Masked(secrets.Get(secrets.KeyGitHubToken)) + ")").Label("GitHub Token")
 			ui.TextInput(c.Key("in-clash-sec"), &s.ClashSecretDraft).Password().

@@ -140,6 +140,8 @@ func RunAll(ctx context.Context, cfg config.Config, mem *store.Store) []model.Do
 		if _, err := os.Stat("/Applications/Security Sentinel.app"); err == nil {
 			modeDesc := fmt.Sprintf("每 %d 小时自动巡检", max(1, cfg.Notifications.AutoScanHours))
 			switch cfg.Notifications.ScanMode {
+			case "twice_daily":
+				modeDesc = fmt.Sprintf("每日双点巡检 (%s 对称 12h 锚点)", cfg.Notifications.DailyScanTime)
 			case "daily":
 				modeDesc = fmt.Sprintf("每日 %s 定点巡检", cfg.Notifications.DailyScanTime)
 			case "manual":

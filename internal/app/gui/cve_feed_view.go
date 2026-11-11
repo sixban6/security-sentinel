@@ -46,8 +46,8 @@ func (s *AppState) renderDailyCVEFeedPage(c *ui.Context) {
 		s.cveCacheGen, len(s.DailyAdvisories), s.CVEDaysChoice, catCode, sevCode, s.CVEEcosystemChoice, s.CVESearchQuery)
 	if s.cveCacheSig != sig {
 		sourceAdvs := s.DailyAdvisories
-		if s.CVEDaysChoice == "" || s.CVEDaysChoice == "昨今两日" {
-			sourceAdvs = notify.FilterAdvisoriesTodayAndYesterday(s.DailyAdvisories, time.Now())
+		if s.CVEDaysChoice == "" || s.CVEDaysChoice == "今日" {
+			sourceAdvs = notify.FilterAdvisoriesToday(s.DailyAdvisories, time.Now())
 		}
 		allDedup := notify.FilterAdvisories(sourceAdvs, "all", "all", "all", "")
 		langTotal, osTotal, krnTotal := 0, 0, 0
@@ -114,7 +114,7 @@ func (s *AppState) renderDailyCVEFeedPage(c *ui.Context) {
 
 			prevDays := s.CVEDaysChoice
 			if ui.Select(c.Key("cve-days-sel"), &s.CVEDaysChoice,
-				[]string{"昨今两日", "近 1 天", "近 3 天", "近 7 天", "近 14 天"}).
+				[]string{"今日", "近 2 天", "近 3 天", "近 7 天", "近 14 天"}).
 				Width(115).Label("时间窗口").Changed() && s.CVEDaysChoice != prevDays {
 				s.RefreshDailyCVEsAsync(false)
 			}

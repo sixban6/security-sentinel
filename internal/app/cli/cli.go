@@ -240,8 +240,12 @@ func runAudit(ctx context.Context, cfgPath string, args []string) {
 			if !*asJSON && stage == "done" && inv != nil {
 				if inv.Error != "" {
 					fmt.Printf("    ⚠️ [%s] %s\n", host.Name, inv.Error)
+				} else if host.IsLocal() {
+					fmt.Printf("    ✓ [%s] %s · %d 资产 (采集 %.1fs)\n", host.Name, inv.OSContext.OSPretty, len(inv.Assets), float64(inv.ScanDurationMS)/1000.0)
+				} else if inv.ScanDurationMS > 0 {
+					fmt.Printf("    ✓ [%s] %s · %d 资产 (延迟 %dms · 采集 %.1fs)\n", host.Name, inv.OSContext.OSPretty, len(inv.Assets), inv.LatencyMS, float64(inv.ScanDurationMS)/1000.0)
 				} else {
-					fmt.Printf("    ✓ [%s] %s · %d 资产 (%dms)\n", host.Name, inv.OSContext.OSPretty, len(inv.Assets), inv.LatencyMS)
+					fmt.Printf("    ✓ [%s] %s · %d 资产 (延迟 %dms)\n", host.Name, inv.OSContext.OSPretty, len(inv.Assets), inv.LatencyMS)
 				}
 			}
 		},
@@ -463,13 +467,13 @@ func runDoctor(ctx context.Context, cfgPath string, args []string) {
 
 func runAdvisories(ctx context.Context, cfgPath string, args []string) {
 	fs := flag.NewFlagSet("cve", flag.ExitOnError)
-	days := fs.Int("days", 0, "检索近 N 天通告 (不传默认展示并推送当天+昨天)")
+	days := fs.Int("days", 0, "检索近 N 天通告 (不传默认展示并推送今日)")
 	category := fs.String("category", "all", "领域分类过滤: all | language | os | kernel")
 	severity := fs.String("severity", "all", "重要性分级过滤: all | CRITICAL | HIGH | MEDIUM")
 	eco := fs.String("eco", "", "按具体生态或发行版过滤 (如 PyPI, npm, Maven, Go, Debian, Ubuntu, RHEL)")
 	query := fs.String("q", "", "按 CVE 编号、包名或关键词搜索")
 	limit := fs.Int("limit", 40, "终端每个分区或列表最多展示条数")
-	pushTG := fs.Bool("push", false, "将每日最新 CVE (默认当天+昨天) 按分类单独推送一条日报卡片至 Telegram")
+	pushTG := fs.Bool("push", false, "将每日最新 CVE (默认今日) 按分类单独推送一条日报卡片至 Telegram")
 	asJSON := fs.Bool("json", false, "输出 JSON")
 	fresh := fs.Bool("fresh", false, "跳过本地缓存强制实时拉取")
 	_ = fs.Parse(args)
@@ -486,9 +490,9 @@ func runAdvisories(ctx context.Context, cfgPath string, args []string) {
 	now := time.Now()
 	windowDesc := fmt.Sprintf("近 %d 天", *days)
 	if *days <= 0 {
-		advs = notify.FilterAdvisoriesTodayAndYesterday(advs, now)
+		advs = notify.FilterAdvisoriesToday(advs, now)
 		todayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-		windowDesc = fmt.Sprintf("%s ~ %s · 昨今两日", todayStart.AddDate(0, 0, -1).Format("01-02"), todayStart.Format("01-02"))
+		windowDesc = fmt.Sprintf("%s · 今日", todayStart.Format("01-02"))
 	}
 
 	catNorm := strings.ToLower(strings.TrimSpace(*category))

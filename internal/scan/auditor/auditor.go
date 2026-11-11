@@ -133,10 +133,15 @@ func auditSingleHost(
 	osvHits map[string][]model.Advisory,
 	mem *store.Store,
 ) model.HostAuditResult {
+	latMS := inv.LatencyMS
+	if inv.Target.IsLocal() {
+		latMS = 0
+	}
 	res := model.HostAuditResult{
 		Target:           inv.Target,
 		Host:             inv.Target.Name,
-		LatencyMS:        inv.LatencyMS,
+		LatencyMS:        latMS,
+		ScanDurationMS:   inv.ScanDurationMS,
 		PackagesCount:    len(inv.Packages),
 		AssetsCount:      len(inv.Assets),
 		OSContext:        inv.OSContext,

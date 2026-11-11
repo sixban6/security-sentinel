@@ -269,3 +269,36 @@ func TestSelfUpdateBannerSidebarAndModalUX(t *testing.T) {
 		t.Fatalf("expected Self-Update Modal to display release notes, texts=%v", mt.Texts())
 	}
 }
+
+func TestTwiceDailyAnchoredScheduleAndLocalLatencyMigration(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SENTINEL_DISABLE_KEYCHAIN", "1")
+
+	state := NewAppState("", true)
+	state.Cfg.Notifications.ScanMode = "twice_daily"
+	state.Cfg.Notifications.DailyScanTime = "12:00"
+
+	loc := time.FixedZone("CST", 8*3600)
+	// Manual rescan at 15:53 must NOT drift the next 00:00 slot!
+	state.LastScanAt = time.Date(2026, 11, 11, 15, 53, 0, 0, loc)
+	nextDue, dueNow, _ := state.NextScheduledScanInfo(time.Date(2026, 11, 11, 16, 10, 0, 0, loc))
+	if dueNow || nextDue.Hour() != 0 || nextDue.Minute() != 0 || nextDue.Day() != 12 {
+		t.Fatalf("expected next anchored slot 2026-11-12 00:00, got dueNow=%v nextDue=%v", dueNow, nextDue)
+	}
+
+	// At 00:01 on 11-12, since LastScanAt was 15:53 on 11-11 (< 00:00), it must be due immediately!
+	_, dueAtMidnight, _ := state.NextScheduledScanInfo(time.Date(2026, 11, 12, 0, 1, 0, 0, loc))
+	if !dueAtMidnight {
+		t.Fatal("expected twice_daily scan to trigger at 00:01")
+	}
+
+	// Verify local host bogus LatencyMS is migrated to ScanDurationMS on load
+	rep := reconcileReportWithConfig(model.AuditReport{
+		Hosts: []model.HostAuditResult{
+			{Target: model.HostTarget{ID: "local", Name: "本机研发环境", Type: "local"}, Host: "本机研发环境", LatencyMS: 15035},
+		},
+	}, state.Cfg)
+	if rep.Hosts[0].LatencyMS != 0 || rep.Hosts[0].ScanDurationMS != 15035 {
+		t.Fatalf("expected local host LatencyMS migrated to ScanDurationMS, got %+v", rep.Hosts[0])
+	}
+}

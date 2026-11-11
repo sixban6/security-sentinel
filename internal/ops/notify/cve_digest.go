@@ -159,9 +159,8 @@ func parseAdvisoryLocalDate(adv model.Advisory, loc *time.Location) (string, boo
 	return "", false
 }
 
-// FilterAdvisoriesTodayAndYesterday strictly retains only advisories published on `now`'s local calendar date
-// or the immediately preceding local calendar date (昨天 + 当天).
-func FilterAdvisoriesTodayAndYesterday(advMap map[string]model.Advisory, now time.Time) map[string]model.Advisory {
+// FilterAdvisoriesToday strictly retains only advisories published on `now`'s local calendar date (今日 00:00~23:59).
+func FilterAdvisoriesToday(advMap map[string]model.Advisory, now time.Time) map[string]model.Advisory {
 	out := make(map[string]model.Advisory)
 	if len(advMap) == 0 {
 		return out
@@ -173,14 +172,13 @@ func FilterAdvisoriesTodayAndYesterday(advMap map[string]model.Advisory, now tim
 	nowLocal := now.In(loc)
 	todayStart := time.Date(nowLocal.Year(), nowLocal.Month(), nowLocal.Day(), 0, 0, 0, 0, loc)
 	todayStr := todayStart.Format("2006-01-02")
-	yesterdayStr := todayStart.AddDate(0, 0, -1).Format("2006-01-02")
 
 	for k, adv := range advMap {
 		dStr, ok := parseAdvisoryLocalDate(adv, loc)
 		if !ok {
 			continue
 		}
-		if dStr == todayStr || dStr == yesterdayStr {
+		if dStr == todayStr {
 			out[k] = adv
 		}
 	}
@@ -189,14 +187,25 @@ func FilterAdvisoriesTodayAndYesterday(advMap map[string]model.Advisory, now tim
 
 // FormatDailyCVETelegramHTML formats a dedicated standalone Telegram message categorized by
 // Kernel, OS Distributions, Language Ecosystems, and Importance (Critical / High / Medium).
-// When days <= 0, the header displays the exact Today + Yesterday local calendar range.
+// When days <= 0, the header displays Today's local calendar date ("MM-DD · 今日").
 func FormatDailyCVETelegramHTML(advMap map[string]model.Advisory, days int, maxPerSection int) string {
 	return FormatDailyCVETelegramDigestHTML(advMap, time.Now(), days, maxPerSection)
 }
 
 // FormatDailyCVETelegramDigestHTML formats the categorized Telegram CVE digest relative to `now`.
-// When days <= 0, it labels the report with the exact local yesterday~today range (e.g. "11-05 ~ 11-06 · 昨今两日").
+// When days <= 0, it labels the report with Today's local date (e.g. "11-11 · 今日").
 func FormatDailyCVETelegramDigestHTML(advMap map[string]model.Advisory, now time.Time, days int, maxPerSection int) string {
+	return formatDailyCVETelegramDigestInternal(advMap, now, days, maxPerSection, false, 0)
+}
+
+func formatDailyCVETelegramDigestInternal(
+	advMap map[string]model.Advisory,
+	now time.Time,
+	days int,
+	maxPerSection int,
+	isIncremental bool,
+	totalTodayCount int,
+) string {
 	if maxPerSection <= 0 {
 		maxPerSection = 8
 	}
@@ -229,20 +238,27 @@ func FormatDailyCVETelegramDigestHTML(advMap map[string]model.Advisory, now time
 		nowLocal = now
 	}
 	nowStr := nowLocal.Format("2006-01-02 15:04")
+	todayStart := time.Date(nowLocal.Year(), nowLocal.Month(), nowLocal.Day(), 0, 0, 0, 0, nowLocal.Location())
 	windowTitle := ""
-	if days <= 0 {
-		todayStart := time.Date(nowLocal.Year(), nowLocal.Month(), nowLocal.Day(), 0, 0, 0, 0, nowLocal.Location())
-		yesterdayStart := todayStart.AddDate(0, 0, -1)
-		windowTitle = fmt.Sprintf("%s ~ %s · 昨今两日", yesterdayStart.Format("01-02"), todayStart.Format("01-02"))
-	} else {
+	switch {
+	case isIncremental:
+		windowTitle = fmt.Sprintf("%s · 今日新增", todayStart.Format("01-02"))
+	case days <= 0:
+		windowTitle = fmt.Sprintf("%s · 今日", todayStart.Format("01-02"))
+	default:
 		windowTitle = fmt.Sprintf("近 %d 天", days)
 	}
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "📡 <b>Security-Sentinel 每日最新 CVE 情报日报 (%s)</b>\n", windowTitle)
 	fmt.Fprintf(&b, "⏱️ <b>更新时间</b>: <code>%s</code>\n", nowStr)
-	fmt.Fprintf(&b, "📊 <b>情报总览</b>: 共 <code>%d</code> 条 (🔴 严重 <code>%d</code> · 🟠 高危 <code>%d</code> · 🟡 中危 <code>%d</code>)\n",
-		len(all), critCnt, highCnt, medCnt)
+	if isIncremental && totalTodayCount >= len(all) {
+		fmt.Fprintf(&b, "📊 <b>本次新增</b>: 共 <code>%d</code> 条 (🔴 严重 <code>%d</code> · 🟠 高危 <code>%d</code> · 🟡 中危 <code>%d</code>) · 今日累计 <code>%d</code> 条\n",
+			len(all), critCnt, highCnt, medCnt, totalTodayCount)
+	} else {
+		fmt.Fprintf(&b, "📊 <b>情报总览</b>: 共 <code>%d</code> 条 (🔴 严重 <code>%d</code> · 🟠 高危 <code>%d</code> · 🟡 中危 <code>%d</code>)\n",
+			len(all), critCnt, highCnt, medCnt)
+	}
 
 	renderSection := func(icon, title string, items []model.Advisory, showEco bool) {
 		fmt.Fprintf(&b, "\n%s <b>%s (%d 条)</b>\n", icon, EscapeHTML(title), len(items))
@@ -295,10 +311,11 @@ func FormatDailyCVETelegramDigestHTML(advMap map[string]model.Advisory, now time
 }
 
 type digestLedger struct {
-	Date      string `json:"date"`
-	SentAt    string `json:"sent_at,omitempty"`
-	Count     int    `json:"count,omitempty"`
-	Signature string `json:"signature"`
+	Date      string   `json:"date"`
+	SentAt    string   `json:"sent_at,omitempty"`
+	Count     int      `json:"count,omitempty"`
+	Signature string   `json:"signature"`
+	SentIDs   []string `json:"sent_ids,omitempty"`
 }
 
 var (
@@ -332,10 +349,19 @@ func acquireDigestLock(staleAfter time.Duration) func() {
 	}
 }
 
+func computeIDsSignature(ids []string) string {
+	cp := append([]string(nil), ids...)
+	sort.Strings(cp)
+	sum := sha256.Sum256([]byte(strings.Join(cp, ",")))
+	return hex.EncodeToString(sum[:16])
+}
+
 // SendDailyCVEDigest pushes the standalone categorized Daily CVE Digest message to Telegram.
-// When days <= 0 (default), advMap is strictly filtered to [yesterday, today] in local calendar time.
-// When force is false (automated audit runs), it enforces strict once-per-calendar-day idempotency
-// so multiple scans or newly published CVEs on the same day never trigger duplicate pushes.
+// When days <= 0 (default) or during automated audit runs (force == false), advMap is strictly filtered
+// to Today [00:00~23:59] in local calendar time:
+//   - On the first automated run of the day with non-empty Today CVEs, sends the full Today digest.
+//   - On subsequent automated runs on the same day, sends ONLY newly published Today CVEs ("今日新增")
+//     not yet recorded in SentIDs, and stays silent if no new Today CVEs appeared.
 func SendDailyCVEDigest(ctx context.Context, advMap map[string]model.Advisory, days int, force bool) (bool, error) {
 	return sendDailyCVEDigestAt(ctx, advMap, time.Now(), days, force)
 }
@@ -347,24 +373,32 @@ func sendDailyCVEDigestAt(ctx context.Context, advMap map[string]model.Advisory,
 	releaseLock := acquireDigestLock(2 * time.Minute)
 	defer releaseLock()
 
+	sendCtx := ctx
+	if sendCtx == nil || sendCtx.Err() != nil {
+		var cancel context.CancelFunc
+		sendCtx, cancel = context.WithTimeout(context.Background(), 25*time.Second)
+		defer cancel()
+	}
+
 	nowLocal := now.Local()
 	if now.Location() != nil {
 		nowLocal = now
 	}
 	today := nowLocal.Format("2006-01-02")
 
-	if !force {
-		if b, err := os.ReadFile(digestLedgerPath()); err == nil {
-			var prev digestLedger
-			if json.Unmarshal(b, &prev) == nil && prev.Date == today {
-				return false, nil
-			}
+	var prev digestLedger
+	hasPrevToday := false
+	if b, err := os.ReadFile(digestLedgerPath()); err == nil {
+		if json.Unmarshal(b, &prev) == nil && prev.Date == today {
+			hasPrevToday = true
 		}
 	}
 
+	effectiveDays := days
 	targetMap := advMap
-	if days <= 0 {
-		targetMap = FilterAdvisoriesTodayAndYesterday(advMap, nowLocal)
+	if !force || effectiveDays <= 0 {
+		effectiveDays = 0
+		targetMap = FilterAdvisoriesToday(advMap, nowLocal)
 	}
 
 	all := FilterAdvisories(targetMap, "all", "all", "all", "")
@@ -372,27 +406,78 @@ func sendDailyCVEDigestAt(ctx context.Context, advMap map[string]model.Advisory,
 		return false, nil
 	}
 
-	var ids []string
+	idSet := make(map[string]bool, len(all))
+	var currentIDs []string
 	for _, a := range all {
-		ids = append(ids, a.DisplayID())
+		id := a.DisplayID()
+		if !idSet[id] {
+			idSet[id] = true
+			currentIDs = append(currentIDs, id)
+		}
 	}
-	sort.Strings(ids)
-	sum := sha256.Sum256([]byte(strings.Join(ids, ",")))
-	sig := hex.EncodeToString(sum[:16])
+	sort.Strings(currentIDs)
+	currentSig := computeIDsSignature(currentIDs)
 
-	msg := FormatDailyCVETelegramDigestHTML(targetMap, nowLocal, days, 8)
-	sent, err := sendTGFunc(ctx, msg, "", "")
+	isIncremental := false
+	msgMap := targetMap
+	mergedIDSet := make(map[string]bool, len(currentIDs))
+	for _, id := range currentIDs {
+		mergedIDSet[id] = true
+	}
+
+	if hasPrevToday {
+		for _, id := range prev.SentIDs {
+			mergedIDSet[id] = true
+		}
+		if !force {
+			// Legacy ledger without SentIDs: compare signature directly.
+			if len(prev.SentIDs) == 0 && prev.Signature != "" && prev.Signature == currentSig {
+				return false, nil
+			}
+			if len(prev.SentIDs) > 0 {
+				sentAlready := make(map[string]bool, len(prev.SentIDs))
+				for _, id := range prev.SentIDs {
+					sentAlready[id] = true
+				}
+				deltaMap := make(map[string]model.Advisory)
+				for k, adv := range targetMap {
+					if !sentAlready[adv.DisplayID()] {
+						deltaMap[k] = adv
+					}
+				}
+				deltaAll := FilterAdvisories(deltaMap, "all", "all", "all", "")
+				if len(deltaAll) == 0 {
+					return false, nil
+				}
+				msgMap = deltaMap
+				isIncremental = true
+			}
+		}
+	}
+
+	var mergedIDs []string
+	for id := range mergedIDSet {
+		mergedIDs = append(mergedIDs, id)
+	}
+	sort.Strings(mergedIDs)
+
+	msg := formatDailyCVETelegramDigestInternal(msgMap, nowLocal, effectiveDays, 8, isIncremental, len(mergedIDs))
+	sent, err := sendTGFunc(sendCtx, msg, "", "")
 	if err != nil || !sent {
 		return sent, err
 	}
 
-	if raw, err := json.Marshal(digestLedger{
-		Date:      today,
-		SentAt:    nowLocal.Format(time.RFC3339),
-		Count:     len(all),
-		Signature: sig,
-	}); err == nil {
-		_ = writeAtomic(digestLedgerPath(), raw)
+	// Persist Today's sent CVE ID ledger whenever pushing Today's window (automated or manual Today push).
+	if effectiveDays <= 0 {
+		if raw, err := json.Marshal(digestLedger{
+			Date:      today,
+			SentAt:    nowLocal.Format(time.RFC3339),
+			Count:     len(mergedIDs),
+			Signature: computeIDsSignature(mergedIDs),
+			SentIDs:   mergedIDs,
+		}); err == nil {
+			_ = writeAtomic(digestLedgerPath(), raw)
+		}
 	}
 	return true, nil
 }

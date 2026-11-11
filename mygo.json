@@ -1,7 +1,7 @@
 {
   "name": "Security Sentinel",
   "identifier": "com.sixban6.security-sentinel",
-  "version": "2.7.2",
+  "version": "2.7.5",
   "copyright": "Copyright (c) 2026 Security Sentinel Contributors",
   "main": "./cmd/sentinel-app",
   "out": "build",
@@ -11,7 +11,10 @@
     "dmgTitle": "Security Sentinel",
     "infoPlist": {
       "LSUIElement": true,
-      "NSAppleEventsUsageDescription": "Security Sentinel 需要调用您的终端应用以一键打开远程服务器 SSH 会话。"
+      "NSAppleEventsUsageDescription": "Security Sentinel 需要调用您的终端应用以一键打开远程服务器 SSH 会话。",
+      "NSDocumentsFolderUsageDescription": "Security Sentinel 需要扫描工作区目录中的项目锁文件以检测第三方依赖安全风险。",
+      "NSDesktopFolderUsageDescription": "Security Sentinel 需要扫描工作区目录中的项目锁文件以检测第三方依赖安全风险。",
+      "NSDownloadsFolderUsageDescription": "Security Sentinel 需要访问下载目录以校验并安装安全更新包。"
     }
   },
   "linux": {
